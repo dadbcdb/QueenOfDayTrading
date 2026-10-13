@@ -25,7 +25,7 @@ public class MainActivity extends Activity {
     private String scope="unlinked",from=LocalDate.now(ZoneId.of("Asia/Seoul")).minusDays(30).format(DateTimeFormatter.BASIC_ISO_DATE),to=LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE);
     private int tab=0; private boolean busy=false; private boolean mock=false;
     private KiwoomApi activeApi; private final ExecutorService worker=Executors.newSingleThreadExecutor();
-    private String notice="",exportData;
+    private String notice="",exportData,chartCode="";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
@@ -77,11 +77,11 @@ public class MainActivity extends Activity {
         ScrollView scroll=new ScrollView(this); scroll.setFillViewport(true); content=column(); content.setPadding(dp(22),dp(8),dp(22),dp(20)); scroll.addView(content); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         if(busy) { ProgressBar progress=new ProgressBar(this); content.addView(progress,new LinearLayout.LayoutParams(-1,dp(36))); content.addView(text("키움에서 내역을 가져오는 중…",14,GREEN)); }
         if(!notice.isEmpty()) content.addView(text(notice,13,GREEN));
-        try { switch(tab) { case 0: overview(); break; case 1: trades(); break; case 2: journal(); break; default: settings(); } }
+        try { switch(tab) { case 0: overview(); break; case 1: lots(); break; case 2: trades(); break; case 3: journal(); break; default: settings(); } }
         catch(Exception e) { content.addView(text("저장된 데이터를 읽지 못했습니다. 앱을 다시 실행해 주세요.",14,RED)); }
         nav=new LinearLayout(this); nav.setPadding(dp(9),dp(8),dp(9),dp(8)); nav.setBackgroundColor(PANEL);
-        String[] labels={"요약","거래 내역","매매일지","계좌 설정"};
-        for(int i=0;i<4;i++) { final int next=i; TextView item=text(labels[i],13,i==tab?GREEN:MUTED); item.setGravity(Gravity.CENTER); item.setTypeface(null,Typeface.BOLD); item.setPadding(0,dp(14),0,dp(14)); nav.addView(item,new LinearLayout.LayoutParams(0,-2,1)); item.setOnClickListener(v->{tab=next;notice="";render();}); }
+        String[] labels={"요약","매매 짝","거래 내역","매매일지","계좌 설정"};
+        for(int i=0;i<labels.length;i++) { final int next=i; TextView item=text(labels[i],12,i==tab?GREEN:MUTED); item.setGravity(Gravity.CENTER); item.setTypeface(null,Typeface.BOLD); item.setPadding(0,dp(14),0,dp(14)); nav.addView(item,new LinearLayout.LayoutParams(0,-2,1)); item.setOnClickListener(v->{tab=next;notice="";render();}); }
         root.addView(nav); root.requestApplyInsets();
     }
     private void overview() throws Exception {
@@ -89,7 +89,7 @@ public class MainActivity extends Activity {
         JSONObject meta=db.meta(scope);
         if(meta==null) {
             LinearLayout c=card(content); c.addView(text("첫 기록을 시작하세요",20,TEXT)); c.addView(text("계좌를 연결한 뒤 조회 기간을 선택하면 거래 내역과 손익이 이 기기에 저장됩니다.",14,MUTED));
-            button(c,"키움 계좌 연결",()->{tab=3;render();},true); button(c,"샘플로 둘러보기",this::demo,false); return;
+            button(c,"키움 계좌 연결",()->{tab=4;render();},true); button(c,"샘플로 둘러보기",this::demo,false); return;
         }
         List<JSONObject> profits=db.rows("profits",scope); BigDecimal total=BigDecimal.ZERO,fees=BigDecimal.ZERO,taxes=BigDecimal.ZERO;
         TreeMap<String,BigDecimal> months=new TreeMap<>(Collections.reverseOrder());
@@ -98,6 +98,11 @@ public class MainActivity extends Activity {
         c.addView(text("키움 일별 실현 손익 합계 · 수수료·세금 재차감 없음",11,MUTED));
         c.addView(text("손익 조회 수수료  "+Numbers.format(fees)+"원    세금  "+Numbers.format(taxes)+"원",12,MUTED));
         c.addView(text("거래 "+db.rows("trades",scope).size()+"건  ·  일지 "+db.journal(scope).size()+"개",13,TEXT));
+        try { Pairing.Result pr=db.pairing(scope); BigDecimal paired=BigDecimal.ZERO; long left=0;
+            for(Pairing.Pair p:pr.pairs) paired=paired.add(p.profit()); for(Pairing.Lot l:pr.open) left+=l.remaining;
+            TextView pairLine=text("매매 짝 손익 "+signed(paired)+"  ·  남은 물량 "+pr.open.size()+"묶음 "+Numbers.format(BigDecimal.valueOf(left))+"주",13,profitColor(paired));
+            pairLine.setOnClickListener(v->{tab=1;render();}); c.addView(pairLine);
+        } catch(Exception e) { c.addView(text("매매 짝을 계산하지 못했습니다.",12,RED)); }
         content.addView(text("월별 실현 손익",18,TEXT));
         if(months.isEmpty()) content.addView(text("조회된 기간에 실현 손익 기록이 없습니다.",13,MUTED));
         for(Map.Entry<String,BigDecimal> m:months.entrySet()) { LinearLayout row=card(content); row.addView(text(m.getKey().substring(0,4)+"년 "+m.getKey().substring(4)+"월",14,MUTED)); row.addView(text(Numbers.format(m.getValue())+"원",22,m.getValue().signum()<0?RED:GREEN)); }
@@ -111,7 +116,7 @@ public class MainActivity extends Activity {
         content.addView(text("마지막 조회: "+Numbers.date(meta.getString("from"))+" ~ "+Numbers.date(meta.getString("to")),12,MUTED));
         content.addView(text("저장 시각: "+java.time.Instant.ofEpochMilli(meta.getLong("synced")).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm")),12,MUTED));
         content.addView(text("월별 합계는 가져온 날짜만 포함합니다. 기간을 넓혀 동기화하면 기록이 추가됩니다. 보유 종목 평가는 실시간 시세가 아닙니다.",12,MUTED));
-        button(content,"거래 내역 동기화",()->{tab=3;render();},true);
+        button(content,"거래 내역 동기화",()->{tab=4;render();},true);
     }
     private void trades() throws Exception {
         content.addView(heading("거래 내역")); content.addView(text("거래를 눌러 매매 이유와 복기를 남기세요.",13,MUTED));
@@ -138,10 +143,123 @@ public class MainActivity extends Activity {
             c.setOnClickListener(v->editNote(id,r.optString("stk_nm")+" · "+Numbers.date(r.optString("cntr_dt",r.optString("trde_dt")))));
         } catch(Exception e) { parent.addView(text("읽을 수 없는 거래 기록",13,RED)); }
     }
+    private int profitColor(BigDecimal n) { return n.signum()<0?RED:GREEN; }
+    private String signed(BigDecimal n) { return (n.signum()>0?"+":"")+Numbers.format(n)+"원"; }
+    private void lots() throws Exception {
+        content.addView(heading("매매 짝")); content.addView(text("떨어질 때 산 묶음을 산 값보다 오를 때 팝니다. 매도는 매도가보다 싸게 산 최근 매수부터 자동으로 짝짓습니다(LIFO).",13,MUTED));
+        Pairing.Result r=db.pairing(scope);
+        for(String issue:r.issues) content.addView(text(issue,12,RED));
+        Map<String,String> names=new LinkedHashMap<>(); for(Pairing.Fill f:r.fills) names.putIfAbsent(f.code,f.name);
+        Map<String,BigDecimal> held=new HashMap<>();
+        for(JSONObject h:db.rows("holdings",scope)) { String code=Pairing.code(h.optString("stk_cd")); names.putIfAbsent(code,h.optString("stk_nm",code)); held.put(code,Numbers.parse(h.optString("rmnd_qty"))); }
+        if(names.isEmpty()) { LinearLayout c=card(content); c.addView(text("짝지을 거래가 없습니다",18,TEXT)); c.addView(text("계좌 설정에서 거래 내역을 가져오세요.",14,MUTED)); button(c,"계좌 설정",()->{tab=4;render();},true); return; }
+        chart(r,names);
+        content.addView(text("남은 물량 · 이 값보다 오르면 매도",18,TEXT));
+        for(Map.Entry<String,String> s:names.entrySet()) {
+            List<Pairing.Lot> open=new ArrayList<>(); long remaining=0;
+            for(Pairing.Lot l:r.open) if(l.buy.code.equals(s.getKey())) { open.add(l); remaining+=l.remaining; }
+            long orphan=0; for(Map.Entry<String,Long> u:r.unmatched.entrySet()) if(r.fill(u.getKey()).code.equals(s.getKey())) orphan+=u.getValue();
+            BigDecimal broker=held.get(s.getKey()); boolean mismatch=broker!=null && broker.compareTo(BigDecimal.valueOf(remaining))!=0;
+            if(open.isEmpty() && orphan==0 && !mismatch) continue;
+            open.sort((a,b)->b.buy.price.compareTo(a.buy.price));
+            LinearLayout c=card(content); c.addView(text(s.getValue(),17,TEXT)); c.addView(text("남은 "+Numbers.format(BigDecimal.valueOf(remaining))+"주 · "+open.size()+"묶음",13,MUTED));
+            for(Pairing.Lot l:open) {
+                TextView line=text(Numbers.format(l.buy.price)+"원 × "+Numbers.format(BigDecimal.valueOf(l.remaining))+"주    "+(l.buy.opening?"기초 · ":"")+Numbers.date(l.buy.day),16,GREEN); c.addView(line);
+                if(l.buy.opening) line.setOnLongClickListener(v->{ new AlertDialog.Builder(this).setTitle("기초 물량 삭제").setMessage(line.getText()).setNegativeButton("취소",null).setPositiveButton("삭제",(d,w)->{db.deleteOpeningLot(scope,l.buy.id);notice="기초 물량을 삭제했습니다.";render();}).show(); return true; });
+            }
+            if(mismatch) c.addView(text("키움 보유 "+Numbers.format(broker)+"주 · 장부 "+Numbers.format(BigDecimal.valueOf(remaining))+"주. 조회 기간 이전에 산 물량은 기초 물량으로 입력하세요.",12,RED));
+            if(orphan>0) c.addView(text("매수 기록이 없는 매도 "+Numbers.format(BigDecimal.valueOf(orphan))+"주",12,RED));
+        }
+        button(content,"기초 물량 추가",()->addOpeningLot(names,r),false);
+        content.addView(text("완료된 짝",18,TEXT)); content.addView(text("매도를 눌러 짝지을 매수를 직접 고를 수 있습니다. 손익은 수수료·세금 제외.",12,MUTED));
+        Map<String,List<Pairing.Pair>> bySell=new LinkedHashMap<>(); BigDecimal total=BigDecimal.ZERO;
+        for(int i=r.fills.size()-1;i>=0;i--) { Pairing.Fill f=r.fills.get(i); if(f.side.equals("매도")) bySell.put(f.id,r.pairsOf(f.id)); }
+        for(Map.Entry<String,List<Pairing.Pair>> e:bySell.entrySet()) {
+            Pairing.Fill sell=r.fill(e.getKey()); LinearLayout c=card(content);
+            c.addView(text(sell.name+" · "+Numbers.date(sell.day)+" 매도 "+Numbers.format(BigDecimal.valueOf(sell.qty))+"주",13,MUTED));
+            for(Pairing.Pair p:e.getValue()) { BigDecimal profit=p.profit(); total=total.add(profit);
+                c.addView(text(Numbers.format(p.buy.price)+" → "+Numbers.format(p.sell.price)+" × "+Numbers.format(BigDecimal.valueOf(p.qty))+"주   "+signed(profit)+(p.manual?"  · 직접 지정":""),15,profitColor(profit))); }
+            Long orphan=r.unmatched.get(sell.id); if(orphan!=null) c.addView(text("짝 없음 "+Numbers.format(BigDecimal.valueOf(orphan))+"주",13,RED));
+            c.setOnClickListener(v->editPairs(sell,r));
+        }
+        if(bySell.isEmpty()) content.addView(text("아직 매도 기록이 없습니다.",13,MUTED));
+        else content.addView(text("짝 손익 합계  "+signed(total),16,profitColor(total)));
+    }
+    private void chart(Pairing.Result r,Map<String,String> names) {
+        List<String> codes=new ArrayList<>(); for(String code:names.keySet()) if(!r.fillsOf(code).isEmpty()) codes.add(code);
+        if(codes.isEmpty()) return;
+        if(!codes.contains(chartCode)) chartCode=codes.get(0);
+        LinearLayout c=card(content);
+        if(codes.size()>1) {
+            Spinner pick=new Spinner(this); List<String> labels=new ArrayList<>(); for(String code:codes) labels.add(names.get(code));
+            pick.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,labels)); pick.setSelection(codes.indexOf(chartCode)); c.addView(pick);
+            pick.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() { public void onItemSelected(AdapterView<?> p,View v,int pos,long id) { if(!codes.get(pos).equals(chartCode)) { chartCode=codes.get(pos); render(); } } public void onNothingSelected(AdapterView<?> p) {} });
+        } else c.addView(text(names.get(chartCode),17,TEXT));
+        c.addView(text("▲ 매수  ▼ 매도  숫자는 수량 · 실선은 짝 · 점선은 남은 묶음. 그래프를 끌어 시점을 고르세요.",11,MUTED));
+        LotChart chart=new LotChart(this); c.addView(chart,new LinearLayout.LayoutParams(-1,-2));
+        TextView at=text("",14,LotChart.CURSOR),held=text("",16,TEXT),detail=text("",12,MUTED); c.addView(at); c.addView(held); c.addView(detail);
+        LinearLayout steps=new LinearLayout(this); c.addView(steps);
+        for(int d:new int[]{-1,1}) { Button b=new Button(this); b.setText(d<0?"◀ 이전 체결":"다음 체결 ▶"); b.setAllCaps(false); b.setTextColor(TEXT); b.setBackground(shape(Color.rgb(42,57,68),12));
+            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(42),1); lp.setMargins(d<0?0:dp(5),dp(6),d<0?dp(5):0,0); steps.addView(b,lp); b.setOnClickListener(v->chart.moveCursor(chart.cursorIndex()+d)); }
+        chart.show(r,chartCode,f->{
+            List<Pairing.Lot> lots=r.heldAt(f); long qty=0; StringBuilder ladder=new StringBuilder();
+            for(Pairing.Lot l:lots) { qty+=l.remaining; if(ladder.length()>0) ladder.append('\n'); ladder.append(Numbers.format(l.buy.price)).append("원 × ").append(l.remaining).append("주"); }
+            at.setText(String.format(Locale.KOREA,"%s %s %s원 × %d주 직후",Numbers.date(f.day),f.side,Numbers.format(f.price),f.qty));
+            held.setText(lots.isEmpty()?"남은 묶음 없음":"남은 "+lots.size()+"묶음 "+qty+"주\n"+ladder);
+            StringBuilder partners=new StringBuilder();
+            for(Pairing.Pair p:r.pairs) { Pairing.Fill other=p.buy==f?p.sell:p.sell==f?p.buy:null; if(other==null) continue;
+                partners.append(partners.length()==0?"짝: ":", ").append(other.side).append(" ").append(Numbers.date(other.day)).append(" ").append(Numbers.format(other.price)).append("원 ").append(p.qty).append("주 (").append(signed(p.profit())).append(")"); }
+            detail.setText(partners.length()==0?"이 체결은 아직 짝이 없습니다.":partners);
+        });
+    }
+    private LinearLayout dialogBody(AlertDialog.Builder b) {
+        LinearLayout body=column(); body.setPadding(dp(22),dp(8),dp(22),dp(8)); ScrollView sv=new ScrollView(this); sv.addView(body); b.setView(sv); return body;
+    }
+    private EditText numberInput(LinearLayout p,String hint,String value) { EditText e=input(p,hint,value,false); e.setInputType(InputType.TYPE_CLASS_NUMBER); return e; }
+    private void editPairs(Pairing.Fill sell,Pairing.Result r) {
+        AlertDialog.Builder b=new AlertDialog.Builder(this).setTitle(sell.name+" "+Numbers.format(sell.price)+"원 × "+Numbers.format(BigDecimal.valueOf(sell.qty))+"주 매도");
+        LinearLayout body=dialogBody(b); body.addView(text("각 매수 묶음에서 몇 주를 이 매도로 팔았는지 입력하세요. 비워 둔 수량은 자동(LIFO)으로 짝짓습니다.",13,MUTED));
+        Map<String,EditText> fields=new LinkedHashMap<>(); Map<String,Long> limits=new HashMap<>();
+        for(int i=r.fills.size()-1;i>=0;i--) { Pairing.Fill buy=r.fills.get(i);
+            if(!buy.side.equals("매수") || !buy.code.equals(sell.code) || !buy.before(sell)) continue;
+            long mine=0,others=0; for(Pairing.Pair p:r.pairs) if(p.buy==buy) { if(p.sell==sell) mine+=p.qty; else if(p.manual) others+=p.qty; }
+            long limit=buy.qty-others; if(limit<=0) continue; limits.put(buy.id,limit);
+            body.addView(text(Numbers.format(buy.price)+"원 · "+Numbers.date(buy.day)+(buy.opening?" 기초":"")+" · 최대 "+limit+"주",14,TEXT));
+            fields.put(buy.id,numberInput(body,"0",mine>0?String.valueOf(mine):""));
+        }
+        if(fields.isEmpty()) body.addView(text("이 매도보다 먼저 산 매수 묶음이 없습니다. 기초 물량을 먼저 추가하세요.",13,RED));
+        b.setNegativeButton("닫기",null).setNeutralButton("자동으로",(d,w)->{db.setPairs(scope,sell.id,Collections.emptyMap());notice="자동 짝(LIFO)으로 되돌렸습니다.";render();});
+        b.setPositiveButton("저장",(d,w)->{
+            Map<String,Long> chosen=new LinkedHashMap<>(); long sum=0;
+            for(Map.Entry<String,EditText> e:fields.entrySet()) { String v=e.getValue().getText().toString().trim(); if(v.isEmpty()) continue;
+                long q; try {q=Long.parseLong(v);} catch(NumberFormatException ex) {toast("수량을 숫자로 입력해 주세요.");return;}
+                if(q<0 || q>limits.get(e.getKey())) {toast("묶음별 최대 수량을 넘었습니다.");return;}
+                if(q>0) {chosen.put(e.getKey(),q);sum+=q;} }
+            if(sum>sell.qty) {toast("매도 수량("+sell.qty+"주)보다 많습니다.");return;}
+            db.setPairs(scope,sell.id,chosen); notice="짝을 저장했습니다."; render();
+        });
+        b.show();
+    }
+    private void addOpeningLot(Map<String,String> names,Pairing.Result r) {
+        AlertDialog.Builder b=new AlertDialog.Builder(this).setTitle("기초 물량 추가");
+        LinearLayout body=dialogBody(b); body.addView(text("조회 기간 이전에 산 물량을 매수 묶음으로 등록합니다.",13,MUTED));
+        List<String> codes=new ArrayList<>(names.keySet()); List<String> labels=new ArrayList<>(); for(String c:codes) labels.add(names.get(c)+" ("+c+")");
+        Spinner symbol=new Spinner(this); symbol.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,labels)); body.addView(symbol);
+        String first=r.fills.isEmpty()?LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE):LocalDate.parse(r.fills.get(0).day,DateTimeFormatter.BASIC_ISO_DATE).minusDays(1).format(DateTimeFormatter.BASIC_ISO_DATE);
+        EditText day=numberInput(body,"매수일 (예: 20260901)",first),price=numberInput(body,"매수 단가 (원)",""),qty=numberInput(body,"수량 (주)","");
+        b.setNegativeButton("취소",null).setPositiveButton("추가",(d,w)->{
+            try { String code=codes.get(symbol.getSelectedItemPosition());
+                db.addOpeningLot(scope,code,names.get(code),day.getText().toString().trim(),price.getText().toString().trim(),Long.parseLong(qty.getText().toString().trim()));
+                notice="기초 물량을 추가했습니다."; render();
+            } catch(IllegalArgumentException e) {toast(e instanceof NumberFormatException?"가격과 수량을 확인해 주세요.":e.getMessage());}
+            catch(Exception e) {toast("날짜·가격·수량을 확인해 주세요.");}
+        });
+        b.show();
+    }
     private void journal() throws Exception {
         content.addView(heading("매매일지")); content.addView(text("매매 이유, 지킨 원칙, 다음에 바꿀 점.",14,MUTED));
         List<JSONObject> entries=db.journal(scope);
-        if(entries.isEmpty()) { LinearLayout c=card(content); c.addView(text("아직 작성한 일지가 없습니다",18,TEXT)); c.addView(text("거래 내역에서 거래를 선택해 첫 일지를 남겨보세요.",14,MUTED)); button(c,"거래 내역 보기",()->{tab=1;render();},true); }
+        if(entries.isEmpty()) { LinearLayout c=card(content); c.addView(text("아직 작성한 일지가 없습니다",18,TEXT)); c.addView(text("거래 내역에서 거래를 선택해 첫 일지를 남겨보세요.",14,MUTED)); button(c,"거래 내역 보기",()->{tab=2;render();},true); }
         for(JSONObject entry:entries) {
             JSONObject r=entry.optJSONObject("trade"); LinearLayout c=card(content); String title=r==null?"거래 "+entry.getString("id"):r.optString("stk_nm")+" · "+Numbers.date(r.optString("trde_dt"));
             c.addView(text(title,17,GREEN)); c.addView(text(entry.getString("note"),15,TEXT));
@@ -232,7 +350,8 @@ public class MainActivity extends Activity {
         } catch(Exception e) {toast("샘플을 불러오지 못했습니다.");}
     }
     private void export() {
-        try { JSONObject data=new JSONObject().put("format","stockdiary-v1").put("exported",Instant.now().toString()).put("trades",new JSONArray(db.rows("trades",scope))).put("profits",new JSONArray(db.rows("profits",scope))).put("symbolProfits",new JSONArray(db.rows("symbol_profits",scope))).put("holdings",new JSONArray(db.rows("holdings",scope))).put("journal",new JSONArray(db.journal(scope))).put("meta",db.meta(scope));
+        try { JSONObject pairs=new JSONObject(); for(Map.Entry<String,Map<String,Long>> e:db.manualPairs(scope).entrySet()) pairs.put(e.getKey(),new JSONObject(e.getValue()));
+            JSONObject data=new JSONObject().put("format","stockdiary-v2").put("manualPairs",pairs).put("openingLots",new JSONArray(db.openingLots(scope))).put("exported",Instant.now().toString()).put("trades",new JSONArray(db.rows("trades",scope))).put("profits",new JSONArray(db.rows("profits",scope))).put("symbolProfits",new JSONArray(db.rows("symbol_profits",scope))).put("holdings",new JSONArray(db.rows("holdings",scope))).put("journal",new JSONArray(db.journal(scope))).put("meta",db.meta(scope));
             exportData=data.toString(2);Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json").putExtra(Intent.EXTRA_TITLE,"stock-diary-"+LocalDate.now()+".json");startActivityForResult(i,101);
         } catch(Exception e) {toast("백업 파일을 준비하지 못했습니다.");}
     }

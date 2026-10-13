@@ -4,6 +4,7 @@ import org.junit.*;
 import org.junit.runner.RunWith;
 import static org.junit.Assert.*;
 import org.json.*;
+import java.util.Collections;
 import org.robolectric.*;
 import org.robolectric.annotation.Config;
 
@@ -40,6 +41,29 @@ public class DiaryDbTest {
         db.snapshot("demo","20261001","20261009",snapshot("20261002","000000001","20"));
         db.note("real","20261002:000000001","real journal");db.note("demo","20261002:000000001","demo journal");
         db.clearScope("demo");assertEquals(1,db.rows("trades","real").size());assertEquals(0,db.rows("trades","demo").size());assertEquals("real journal",db.note("real","20261002:000000001"));
+    }
+    @Test public void manualPairsAndOpeningLotsSurviveSyncAndClearWithScope() throws Exception {
+        JSONObject sell=new JSONObject().put("trde_dt","20261002").put("trde_no","000000001").put("stk_cd","A005930").put("stk_nm","삼성전자").put("io_tp_nm","매도").put("trde_qty_jwa_cnt","2").put("trde_unit","70,000");
+        KiwoomApi.Snapshot s=new KiwoomApi.Snapshot(new JSONArray().put(sell),new JSONArray(),new JSONArray(),new JSONObject());
+        db.snapshot("real","20261001","20261009",s);
+        assertEquals(Long.valueOf(2),db.pairing("real").unmatched.get("20261002:000000001"));
+        String lot=db.addOpeningLot("real","005930","삼성전자","20260901","65000",2);
+        assertTrue(db.pairing("real").unmatched.isEmpty());
+        db.setPairs("real","20261002:000000001",Collections.singletonMap(lot,2L));
+        db.snapshot("real","20261001","20261009",s);
+        Pairing.Result r=db.pairing("real");
+        assertEquals(1,r.pairs.size());assertTrue(r.pairs.get(0).manual);assertEquals(new java.math.BigDecimal("10000"),r.pairs.get(0).profit());
+        db.setPairs("real","20261002:000000001",Collections.emptyMap());assertFalse(db.pairing("real").pairs.get(0).manual);
+        db.clearScope("real");assertTrue(db.openingLots("real").isEmpty());assertTrue(db.manualPairs("real").isEmpty());
+    }
+    @Test public void version1DatabaseUpgradesWithoutLosingTrades() throws Exception {
+        db.close(); android.content.Context ctx=RuntimeEnvironment.getApplication(); ctx.deleteDatabase("diary.db");
+        android.database.sqlite.SQLiteDatabase old=android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(ctx.getDatabasePath("diary.db"),null);
+        old.execSQL("CREATE TABLE trades(scope TEXT,id TEXT,day TEXT,raw TEXT,PRIMARY KEY(scope,id))");
+        old.execSQL("INSERT INTO trades VALUES('real','20261002:1','20261002','{\"trde_dt\":\"20261002\",\"trde_no\":\"1\"}')");
+        old.setVersion(1); old.close();
+        db=new DiaryDb(ctx);
+        assertEquals(1,db.rows("trades","real").size());assertTrue(db.manualPairs("real").isEmpty());assertTrue(db.openingLots("real").isEmpty());
     }
     @Test public void brokerRemovedTradeStillHasAnAccessibleJournal() throws Exception {
         db.snapshot("real","20261001","20261009",snapshot("20261002","000000001","10"));db.note("real","20261002:000000001","복기 기록");

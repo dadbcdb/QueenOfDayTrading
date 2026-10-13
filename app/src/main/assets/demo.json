@@ -3,7 +3,9 @@
     {"trde_dt":"20261002","trde_no":"000000001","cntr_dt":"20260930","stk_cd":"A005930","stk_nm":"삼성전자","io_tp_nm":"매수","rmrk_nm":"장내매수","trde_qty_jwa_cnt":"10","trde_unit":"70,000","trde_amt":"700000","cmsn":"100","trde_agri_tax":"0"},
     {"trde_dt":"20261006","trde_no":"000000002","cntr_dt":"20261002","stk_cd":"A005930","stk_nm":"삼성전자","io_tp_nm":"매도","rmrk_nm":"장내매도","trde_qty_jwa_cnt":"5","trde_unit":"74,000","trde_amt":"370000","cmsn":"50","trde_agri_tax":"550"},
     {"trde_dt":"20261007","trde_no":"000000003","cntr_dt":"20261005","stk_cd":"A000660","stk_nm":"SK하이닉스","io_tp_nm":"매수","rmrk_nm":"장내매수","trde_qty_jwa_cnt":"2","trde_unit":"200,000","trde_amt":"400000","cmsn":"60","trde_agri_tax":"0"},
-    {"trde_dt":"20261008","trde_no":"000000004","cntr_dt":"20261006","stk_cd":"A000660","stk_nm":"SK하이닉스","io_tp_nm":"매도","rmrk_nm":"장내매도","trde_qty_jwa_cnt":"1","trde_unit":"195,000","trde_amt":"195000","cmsn":"30","trde_agri_tax":"290"}
+    {"trde_dt":"20261008","trde_no":"000000004","cntr_dt":"20261006","stk_cd":"A000660","stk_nm":"SK하이닉스","io_tp_nm":"매도","rmrk_nm":"장내매도","trde_qty_jwa_cnt":"1","trde_unit":"195,000","trde_amt":"195000","cmsn":"30","trde_agri_tax":"290"},
+    {"trde_dt":"20261009","trde_no":"000000005","cntr_dt":"20261007","stk_cd":"A005930","stk_nm":"삼성전자","io_tp_nm":"매수","rmrk_nm":"장내매수","trde_qty_jwa_cnt":"3","trde_unit":"68,000","trde_amt":"204000","cmsn":"30","trde_agri_tax":"0"},
+    {"trde_dt":"20261009","trde_no":"000000006","cntr_dt":"20261008","stk_cd":"A005930","stk_nm":"삼성전자","io_tp_nm":"매도","rmrk_nm":"장내매도","trde_qty_jwa_cnt":"3","trde_unit":"71,000","trde_amt":"213000","cmsn":"30","trde_agri_tax":"320"}
   ],
   "profits": [
     {"dt":"20261002","tdy_sel_pl":"19350","tdy_trde_cmsn":"50","tdy_trde_tax":"550"},

@@ -1,10 +1,34 @@
 plugins { id 'com.android.application' }
+
+// 모든 PC가 같은 키로 서명해야 폰의 앱을 지우지 않고 업데이트할 수 있다.
+// 키 파일과 비밀번호는 Git 밖에 두고 각 PC의 local.properties에 적는다 (README 참고).
+def localProps = new Properties()
+def localFile = rootProject.file('local.properties')
+if (localFile.exists()) localFile.withInputStream { localProps.load(it) }
+def sharedKeystore = localProps.getProperty('stockdiary.keystore')
+
 android {
     namespace 'kr.stockdiary'
     compileSdk 35
-    defaultConfig { applicationId 'kr.stockdiary'; minSdk 26; targetSdk 35; versionCode 4; versionName '0.1.3' }
+    defaultConfig { applicationId 'kr.stockdiary'; minSdk 26; targetSdk 35; versionCode 5; versionName '0.2.0' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     testOptions { unitTests.returnDefaultValues = true; unitTests.includeAndroidResources = true }
+    if (sharedKeystore) {
+        signingConfigs {
+            shared {
+                storeFile file(sharedKeystore)
+                storePassword localProps.getProperty('stockdiary.storePassword')
+                keyAlias localProps.getProperty('stockdiary.keyAlias')
+                keyPassword localProps.getProperty('stockdiary.keyPassword')
+            }
+        }
+        buildTypes {
+            debug { signingConfig signingConfigs.shared }
+            release { signingConfig signingConfigs.shared }
+        }
+    } else {
+        logger.warn('stockdiary.keystore 미설정: PC별 디버그 키로 서명합니다. 폰에 설치된 앱을 업데이트할 수 없습니다.')
+    }
 }
 dependencies {
     testImplementation 'junit:junit:4.13.2'

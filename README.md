@@ -2,7 +2,7 @@
 
 키움 REST API로 국내주식 거래 내역과 일별 실현 손익을 가져오고, 거래별 매매일지를 기기에 저장하는 안드로이드 앱입니다. Android 8.0 이상에서 실행합니다.
 
-앱 상단과 계좌 설정에서 설치된 버전·빌드 번호를 확인할 수 있습니다. 현재 배포본은 **v0.1.3 (빌드 4)**입니다. 업데이트는 기존 앱 위에 설치하면 됩니다. 오류 문의 시 버전과 전체 오류 문구를 함께 확인하세요. 키움 응답에 상세 코드가 없다면 **상세코드 없음**으로 표시합니다.
+앱 상단과 계좌 설정에서 설치된 버전·빌드 번호를 확인할 수 있습니다. 현재 배포본은 **v0.2.0 (빌드 5)**입니다. v0.2.0부터 전용 서명 키를 사용하므로 v0.1.x에서 올릴 때는 한 번 삭제 후 재설치해야 합니다(아래 서명 키 참고). 이후 업데이트는 기존 앱 위에 설치하면 됩니다. 오류 문의 시 버전과 전체 오류 문구를 함께 확인하세요. 키움 응답에 상세 코드가 없다면 **상세코드 없음**으로 표시합니다.
 
 ## 설치 및 연결
 
@@ -41,6 +41,17 @@ JDK 17 이상(개발 시 JDK 21), Android SDK 35 및 Gradle wrapper를 사용합
 ```powershell
 # local.properties에 본인의 Android SDK 경로 설정
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
+```
+
+### 서명 키 (여러 PC에서 빌드할 때)
+
+폰에 설치된 앱을 지우지 않고 업데이트하려면 모든 PC가 같은 키로 서명해야 합니다. 키 파일(`stockdiary-release.jks`)은 Git에 올리지 않고 USB 등으로 각 PC에 복사한 뒤, `local.properties`에 아래 네 줄을 적습니다. 설정이 없으면 PC별 디버그 키로 서명되어 기존 앱 업데이트가 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`로 거부됩니다.
+
+```properties
+stockdiary.keystore=C:/Users/<사용자>/.android/stockdiary-release.jks
+stockdiary.storePassword=<비밀번호>
+stockdiary.keyAlias=stockdiary
+stockdiary.keyPassword=<비밀번호>
 ```
 
 로컬 개발 도구는 `.tools/`에 설치되어 있으며 Git에서 제외됩니다. `scripts/build.ps1`은 현재 프로젝트의 도구를 자동 감지해 빌드하고 APK를 `release/`에 복사합니다.

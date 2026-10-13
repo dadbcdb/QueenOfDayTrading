@@ -7,7 +7,7 @@ import org.json.*;
 import java.util.*;
 
 final class DiaryDb extends SQLiteOpenHelper {
-    DiaryDb(Context c) { super(c,"diary.db",null,1); }
+    DiaryDb(Context c) { super(c,"diary.db",null,2); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE trades(scope TEXT,id TEXT,day TEXT,raw TEXT,PRIMARY KEY(scope,id))");
         db.execSQL("CREATE TABLE notes(scope TEXT,id TEXT,note TEXT,updated TEXT,PRIMARY KEY(scope,id))");
@@ -15,8 +15,17 @@ final class DiaryDb extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE symbol_profits(scope TEXT,day TEXT,idx INTEGER,raw TEXT,PRIMARY KEY(scope,day,idx))");
         db.execSQL("CREATE TABLE holdings(scope TEXT,idx INTEGER,raw TEXT,PRIMARY KEY(scope,idx))");
         db.execSQL("CREATE TABLE meta(scope TEXT PRIMARY KEY,raw TEXT)");
+        createLotTables(db);
     }
-    @Override public void onUpgrade(SQLiteDatabase db,int a,int b) { throw new IllegalStateException("지원하지 않는 데이터 버전"); }
+    private static void createLotTables(SQLiteDatabase db) {
+        // 수동으로 지정한 매수-매도 짝만 저장한다. 나머지는 Pairing이 매번 계산한다.
+        db.execSQL("CREATE TABLE pairs(scope TEXT,sell_id TEXT,buy_id TEXT,qty INTEGER,PRIMARY KEY(scope,sell_id,buy_id))");
+        db.execSQL("CREATE TABLE opening_lots(scope TEXT,id TEXT,raw TEXT,PRIMARY KEY(scope,id))");
+    }
+    @Override public void onUpgrade(SQLiteDatabase db,int a,int b) {
+        if(a==1 && b==2) { createLotTables(db); return; }
+        throw new IllegalStateException("지원하지 않는 데이터 버전");
+    }
     void snapshot(String scope,String from,String to,KiwoomApi.Snapshot result) throws Exception {
         Set<String> ids=new HashSet<>(), dates=new HashSet<>();
         for(int i=0;i<result.trades.length();i++) {
@@ -90,7 +99,52 @@ final class DiaryDb extends SQLiteOpenHelper {
     }
     void clearScope(String scope) {
         SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
-        try { for(String t:new String[]{"trades","profits","symbol_profits","holdings","notes","meta"}) db.delete(t,"scope=?",new String[]{scope}); db.setTransactionSuccessful(); }
+        try { for(String t:new String[]{"trades","profits","symbol_profits","holdings","notes","meta","pairs","opening_lots"}) db.delete(t,"scope=?",new String[]{scope}); db.setTransactionSuccessful(); }
         finally { db.endTransaction(); }
+    }
+    Map<String,Map<String,Long>> manualPairs(String scope) {
+        Map<String,Map<String,Long>> out=new LinkedHashMap<>();
+        try(Cursor c=getReadableDatabase().query("pairs",new String[]{"sell_id","buy_id","qty"},"scope=?",new String[]{scope},null,null,"sell_id,buy_id")) {
+            while(c.moveToNext()) out.computeIfAbsent(c.getString(0),k->new LinkedHashMap<>()).put(c.getString(1),c.getLong(2));
+        }
+        return out;
+    }
+    /** 매도 한 건의 수동 짝을 통째로 교체한다. 비어 있으면 자동 계산으로 되돌린다. */
+    void setPairs(String scope,String sellId,Map<String,Long> buys) {
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try {
+            db.delete("pairs","scope=? AND sell_id=?",new String[]{scope,sellId});
+            for(Map.Entry<String,Long> e:buys.entrySet()) {
+                if(e.getValue()<=0) continue;
+                ContentValues v=new ContentValues(); v.put("scope",scope); v.put("sell_id",sellId); v.put("buy_id",e.getKey()); v.put("qty",e.getValue()); db.insertOrThrow("pairs",null,v);
+            }
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+    List<JSONObject> openingLots(String scope) throws Exception {
+        List<JSONObject> out=new ArrayList<>();
+        try(Cursor c=getReadableDatabase().query("opening_lots",new String[]{"raw"},"scope=?",new String[]{scope},null,null,"id")) { while(c.moveToNext()) out.add(new JSONObject(c.getString(0))); }
+        return out;
+    }
+    /** 조회 기간 이전에 산 물량. id는 open:으로 시작해 거래 id와 겹치지 않는다. */
+    String addOpeningLot(String scope,String code,String name,String day,String price,long qty) throws Exception {
+        if(day==null || !day.matches("\\d{8}")) throw new IllegalArgumentException("날짜는 8자리로 입력해 주세요.");
+        java.time.LocalDate.parse(day,java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+        if(Numbers.parse(price).signum()<=0 || qty<=0) throw new IllegalArgumentException("가격과 수량을 확인해 주세요.");
+        String id="open:"+day+":"+UUID.randomUUID().toString().substring(0,8);
+        JSONObject r=new JSONObject().put("id",id).put("stk_cd",code).put("stk_nm",name).put("day",day).put("price",Numbers.parse(price).toPlainString()).put("qty",qty);
+        ContentValues v=new ContentValues(); v.put("scope",scope); v.put("id",id); v.put("raw",r.toString()); getWritableDatabase().insertOrThrow("opening_lots",null,v);
+        return id;
+    }
+    void deleteOpeningLot(String scope,String id) {
+        SQLiteDatabase db=getWritableDatabase(); db.beginTransaction();
+        try { db.delete("opening_lots","scope=? AND id=?",new String[]{scope,id}); db.delete("pairs","scope=? AND buy_id=?",new String[]{scope,id}); db.setTransactionSuccessful(); }
+        finally { db.endTransaction(); }
+    }
+    Pairing.Result pairing(String scope) throws Exception {
+        List<Pairing.Fill> fills=new ArrayList<>();
+        for(JSONObject r:rows("trades",scope)) { Pairing.Fill f=Pairing.fromTrade(r); if(f!=null) fills.add(f); }
+        for(JSONObject r:openingLots(scope)) fills.add(Pairing.fromOpening(r));
+        return Pairing.run(fills,manualPairs(scope));
     }
 }
