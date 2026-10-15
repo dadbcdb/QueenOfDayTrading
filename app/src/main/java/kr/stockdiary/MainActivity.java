@@ -28,8 +28,18 @@ public class MainActivity extends Activity {
     private String notice="",step="",exportData,chartCode="",cursorFill="";
     /** 현재가 캐시(종목코드 → 가격·조회 시각). 토큰은 메모리에만 둔다. */
     private final Map<String,BigDecimal> quotes=new HashMap<>(); private final Map<String,Long> quoteAt=new HashMap<>();
-    private final Set<String> quoteLoading=new HashSet<>(); private volatile String quoteToken;
+    private final Set<String> quoteLoading=new HashSet<>();
+    private QuoteClient quoteClient=newQuoteClient();
+    private String quoteScope=""; private long quoteGeneration;
+    private LotChart visibleQuoteChart; private TextView visibleQuoteLine; private String visibleQuoteCode="";
+    private boolean quoteVisible;
+    private final Handler quoteHandler=new Handler(Looper.getMainLooper());
+    private final Runnable quoteTick=()->{if(quoteVisible && visibleQuoteChart!=null)showQuote(visibleQuoteChart,visibleQuoteLine,visibleQuoteCode,true);};
+    private static final long QUOTE_INTERVAL=10_000;
     private final ExecutorService quoteWorker=Executors.newSingleThreadExecutor();
+    private final ExecutorService ipWorker=Executors.newSingleThreadExecutor();
+    private String publicIp="",ipStatus="IP 확인을 눌러 조회하세요.";private boolean ipLoading;
+    private TextView ipView;private Button ipCheckButton,ipCopyButton;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
@@ -49,7 +59,9 @@ public class MainActivity extends Activity {
         image.setOnClickListener(v->next.run()); image.postDelayed(next,2000);
     }
     @Override protected void onSaveInstanceState(Bundle b) { super.onSaveInstanceState(b); b.putInt("tab",tab); b.putString("chartCode",chartCode); b.putString("cursorFill",cursorFill); }
-    @Override protected void onDestroy() { if(activeApi!=null) activeApi.cancel(); worker.execute(db::close); worker.shutdown(); quoteWorker.shutdownNow(); super.onDestroy(); }
+    @Override protected void onResume() { super.onResume();quoteVisible=true;if(visibleQuoteChart!=null)quoteHandler.post(quoteTick); }
+    @Override protected void onPause() { quoteVisible=false;quoteHandler.removeCallbacks(quoteTick);super.onPause(); }
+    @Override protected void onDestroy() { quoteHandler.removeCallbacks(quoteTick); if(activeApi!=null) activeApi.cancel(); worker.execute(db::close); worker.shutdown(); quoteWorker.shutdownNow();ipWorker.shutdownNow(); super.onDestroy(); }
     private int dp(int n) { return (int)(getResources().getDisplayMetrics().density*n+.5f); }
     private GradientDrawable shape(int color,int radius) { GradientDrawable d=new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
     private LinearLayout column() { LinearLayout v=new LinearLayout(this); v.setOrientation(LinearLayout.VERTICAL); return v; }
@@ -79,6 +91,8 @@ public class MainActivity extends Activity {
     }
     private void render() {
         if(isFinishing() || isDestroyed()) return;
+        quoteHandler.removeCallbacks(quoteTick);visibleQuoteChart=null;visibleQuoteLine=null;visibleQuoteCode="";
+        ipView=null;ipCheckButton=null;ipCopyButton=null;
         root=column(); root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v,insets)-> { v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom()); return insets; });
         setContentView(root);
@@ -230,6 +244,8 @@ public class MainActivity extends Activity {
         TextView quoteLine=text("",13,LotChart.QUOTE); c.addView(quoteLine);
         LotChart chart=new LotChart(this); c.addView(chart,new LinearLayout.LayoutParams(-1,-2));
         showQuote(chart,quoteLine,chartCode);
+        final String refreshCode=chartCode;
+        button(c,"현재가 새로고침",()->showQuote(chart,quoteLine,refreshCode,true),false);
         LinearLayout steps=new LinearLayout(this); c.addView(steps);
         for(int d:new int[]{-1,1}) { Button b=new Button(this); b.setText(d<0?"◀ 이전 체결":"다음 체결 ▶"); b.setAllCaps(false); b.setTextColor(TEXT); b.setBackground(shape(Color.rgb(42,57,68),12));
             LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(42),1); lp.setMargins(d<0?0:dp(5),dp(6),d<0?dp(5):0,0); steps.addView(b,lp); b.setOnClickListener(v->chart.moveCursor(chart.cursorIndex()+d)); }
@@ -293,37 +309,68 @@ public class MainActivity extends Activity {
         return head+"\n지금 "+f.qty+"주 팔면 "+signed(net)+"  (수수료 "+Numbers.format(fees)+" · 세금 "+Numbers.format(tax)+")"
             +String.format(Locale.KOREA,"\n수수료율 %.3f%% · 세금률 %.2f%% (%s)",rates[0].doubleValue()*100,rates[1].doubleValue()*100,rates[2].signum()>0?"내 거래 기록 기준 추정":"기본값");
     }
-    /** 캐시된 현재가를 바로 그리고, 1분이 지났으면 키움에서 다시 받아 같은 그래프를 고친다. 실패하면 마지막 동기화의 보유 종목 현재가를 쓴다. */
+    /** 화면이 보이는 동안 10초마다 조회한다. 마지막 저장 가격과 조회 실패는 구분해서 표시한다. */
     private void showQuote(LotChart chart,TextView line,String code) {
-        BigDecimal cached=quotes.get(code); Long when=quoteAt.get(code);
-        if(cached!=null) { chart.setQuote(cached); line.setText("현재가 "+Numbers.format(cached)+"원 · "+Instant.ofEpochMilli(when).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("HH:mm"))+" 기준"); }
-        if((when!=null && System.currentTimeMillis()-when<60_000) || quoteLoading.contains(code) || scope.equals("demo-v1")) { if(cached==null) fallbackQuote(chart,line,code); return; }
-        final JSONObject credentials; try { credentials=secrets.load(); } catch(Exception e) { fallbackQuote(chart,line,code); return; }
-        if(credentials==null) { fallbackQuote(chart,line,code); return; }
-        if(cached==null) line.setText("현재가 불러오는 중…");
-        quoteLoading.add(code);
+        showQuote(chart,line,code,false);
+    }
+    private void resetQuotes() {
+        quoteGeneration++;quotes.clear();quoteAt.clear();quoteLoading.clear();quoteClient=newQuoteClient();quoteScope=scope;
+        quoteHandler.removeCallbacks(quoteTick);
+    }
+    QuoteClient newQuoteClient() { return new QuoteClient(); }
+    JSONObject loadQuoteCredentials() throws Exception { return secrets.load(); }
+    private void scheduleQuote(long delay) {
+        quoteHandler.removeCallbacks(quoteTick);
+        if(quoteVisible && visibleQuoteChart!=null && !scope.equals("demo-v1"))quoteHandler.postDelayed(quoteTick,Math.max(1000,delay));
+    }
+    private void paintQuote(LotChart chart,TextView line,String code,String error) {
+        BigDecimal cached=quotes.get(code);Long when=quoteAt.get(code);
+        if(cached!=null && when!=null) {
+            chart.setQuote(cached);
+            line.setText(getString(R.string.quote_live,Numbers.format(cached),Instant.ofEpochMilli(when).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("HH:mm:ss"))));
+        } else fallbackQuote(chart,line,code);
+        if(!error.isEmpty()){line.append("\n");line.append(error);}
+    }
+    private void showQuote(LotChart chart,TextView line,String code,boolean force) {
+        if(!quoteScope.equals(scope))resetQuotes();
+        visibleQuoteChart=chart;visibleQuoteLine=line;visibleQuoteCode=code;
+        paintQuote(chart,line,code,"");
+        if(scope.equals("demo-v1")){line.setText("샘플 데이터 · 현재가 조회 없음");return;}
+        Long when=quoteAt.get(code);
+        if(!force && when!=null && System.currentTimeMillis()-when<QUOTE_INTERVAL){scheduleQuote(QUOTE_INTERVAL-(System.currentTimeMillis()-when));return;}
+        if(quoteLoading.contains(code))return;
+        final JSONObject credentials;
+        try {
+            credentials=loadQuoteCredentials();
+            if(credentials==null){paintQuote(chart,line,code,"계좌 설정에서 인증키를 저장해 주세요.");return;}
+            if(!Records.scope(credentials.getString("key"),credentials.optBoolean("mock")).equals(scope)){
+                paintQuote(chart,line,code,"선택한 계좌와 저장된 인증키가 다릅니다. 계좌 설정에서 연결을 확인해 주세요.");return;
+            }
+        } catch(Exception e){paintQuote(chart,line,code,"저장된 인증키를 읽지 못했습니다. 계좌 설정에서 다시 저장해 주세요.");return;}
+        if(quotes.get(code)==null)line.setText("현재가 불러오는 중…");
+        quoteLoading.add(code);quoteHandler.removeCallbacks(quoteTick);
+        final long generation=quoteGeneration;final String selectedScope=scope;final QuoteClient client=quoteClient;
         quoteWorker.execute(()->{
-            BigDecimal price=null;
-            try { KiwoomApi api=new KiwoomApi(credentials.optBoolean("mock"));
-                if(quoteToken==null) quoteToken=api.authenticate(credentials.getString("key"),credentials.getString("secret"));
-                price=api.currentPrice(quoteToken,code);
-            } catch(Exception e) { quoteToken=null; android.util.Log.w("StockDiary","quote "+code+" failed: "+reason(e)); }
-            final BigDecimal result=price;
-            runOnUiThread(()->{ quoteLoading.remove(code); if(isDestroyed() || isFinishing()) return;
-                if(result!=null) { quotes.put(code,result); quoteAt.put(code,System.currentTimeMillis()); }
-                // 화면이 이미 다른 종목·탭으로 바뀌었으면 그 그래프는 버려진 것이라 고쳐도 보이지 않는다.
-                // 같은 종목 화면이 그사이 다시 그려졌다면 새 그래프에 반영되도록 다시 그린다.
-                if(!chart.isAttachedToWindow()) { if(result!=null && tab==1 && code.equals(chartCode) && !busy) render(); return; }
-                if(result!=null) showQuote(chart,line,code); else if(quotes.get(code)==null) fallbackQuote(chart,line,code);
+            BigDecimal price=null;String error="";
+            try {price=client.price(credentials.getString("key"),credentials.getString("secret"),credentials.optBoolean("mock"),code);}
+            catch(Exception e){error=reason(e);}
+            final BigDecimal result=price;final String failure=error;
+            runOnUiThread(()->{
+                if(isDestroyed() || isFinishing() || generation!=quoteGeneration || !scope.equals(selectedScope))return;
+                quoteLoading.remove(code);
+                if(result!=null){quotes.put(code,result);quoteAt.put(code,System.currentTimeMillis());}
+                if(visibleQuoteChart!=null && visibleQuoteCode.equals(code)){
+                    paintQuote(visibleQuoteChart,visibleQuoteLine,code,failure);scheduleQuote(QUOTE_INTERVAL);
+                }
             });
         });
     }
     private void fallbackQuote(LotChart chart,TextView line,String code) {
         try { for(JSONObject h:db.rows("holdings",scope)) if(Pairing.code(h.optString("stk_cd")).equals(code)) {
                 BigDecimal p=Numbers.parse(h.optString("cur_prc")).abs(); if(p.signum()==0) break;
-                chart.setQuote(p); line.setText("현재가 "+Numbers.format(p)+"원 · 마지막 동기화 기준"); return; } }
+                chart.setQuote(p); line.setText(getString(R.string.quote_saved,Numbers.format(p))); return; } }
         catch(Exception ignored) {}
-        line.setText("현재가를 불러오지 못했습니다.");
+        line.setText("현재가 조회 전 · 저장된 가격 없음");
     }
     private LinearLayout dialogBody(AlertDialog.Builder b) {
         LinearLayout body=column(); body.setPadding(dp(22),dp(8),dp(22),dp(8)); ScrollView sv=new ScrollView(this); sv.addView(body); b.setView(sv); return body;
@@ -387,6 +434,15 @@ public class MainActivity extends Activity {
     }
     private void settings() throws Exception {
         content.addView(heading("계좌 연결")); content.addView(text("앱 버전  "+appVersion(),13,MUTED)); content.addView(text("인증키는 이 기기에 암호화해 보관합니다.",13,MUTED));
+        LinearLayout ipCard=card(content);ipCard.addView(text("현재 접속 IP · 공인 IPv4",17,GREEN));
+        ipView=text(ipStatus,15,TEXT);ipView.setTextIsSelectable(true);ipCard.addView(ipView);
+        ipCheckButton=button(ipCard,"IP 확인 / 새로고침",this::lookupIp,false);
+        ipCopyButton=button(ipCard,"IP 주소 복사",()->{
+            if(publicIp.isEmpty())return;
+            android.content.ClipboardManager clipboard=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+            clipboard.setPrimaryClip(ClipData.newPlainText("공인 IPv4",publicIp));toast("IP 주소를 복사했습니다.");
+        },false);
+        ipCard.addView(text("휴대폰의 현재 연결망에서 확인합니다. Wi-Fi·LTE/5G·VPN을 바꾼 뒤에는 다시 조회하세요. ipify로 확인한 IPv4이며 키움에 등록된 IP와 비교하세요.",12,MUTED));paintIp();
         LinearLayout c=card(content); JSONObject saved=null; try {saved=secrets.load();} catch(Exception e) {c.addView(text("저장된 키를 읽지 못했습니다. 다시 입력해 주세요.",13,RED));}
         final boolean hasSaved=saved!=null;
         c.addView(text(hasSaved?"인증키 저장됨 · 수정할 때만 입력":"키움 REST API 인증키",15,GREEN));
@@ -395,7 +451,7 @@ public class MainActivity extends Activity {
         button(c,"인증키 저장",()->{
             try { String k=key.getText().toString().trim(),s=secret.getText().toString().trim();
                 if(k.isEmpty() || s.isEmpty()) { toast("App Key와 Secret Key를 모두 입력해 주세요."); return; }
-                String newScope=Records.scope(k,environment.isChecked()); secrets.save(k,s,environment.isChecked()); scope=newScope;mock=environment.isChecked(); persist(); key.setText("");secret.setText(""); notice="인증키를 저장했습니다. 아래에서 동기화하세요."; render();
+                String newScope=Records.scope(k,environment.isChecked()); secrets.save(k,s,environment.isChecked()); scope=newScope;mock=environment.isChecked(); resetQuotes();persist(); key.setText("");secret.setText(""); notice="인증키를 저장했습니다. 아래에서 동기화하세요."; render();
             } catch(Exception e) {toast("인증정보를 저장하지 못했습니다.");}
         },true);
         c.addView(text("키움에 등록된 공인 IP에서 조회해야 합니다. Wi-Fi나 모바일망이 바뀌면 등록 IP를 확인해 주세요. 실전·모의 키는 각각 다릅니다.",12,MUTED));
@@ -414,7 +470,43 @@ public class MainActivity extends Activity {
         if(hasSaved && scope.equals("demo-v1")) button(content,"내 계좌 기록으로 돌아가기",()->{ try {JSONObject credentials=secrets.load();scope=Records.scope(credentials.getString("key"),credentials.getBoolean("mock"));mock=credentials.getBoolean("mock");persist();tab=0;render();} catch(Exception e){toast("저장된 키를 읽지 못했습니다.");}},false);
         button(content,"기록 백업 파일 저장",this::export,false);
         button(content,"현재 계좌의 저장 기록 삭제",()->new AlertDialog.Builder(this).setTitle("저장 기록 삭제").setMessage("현재 선택한 계좌의 거래·손익·일지를 이 기기에서 삭제합니다. 먼저 백업 파일을 저장해 주세요.").setNegativeButton("취소",null).setPositiveButton("삭제",(d,w)->{db.clearScope(scope);notice="저장 기록을 삭제했습니다.";render();}).show(),false);
-        if(hasSaved) button(content,"인증키 삭제",()->new AlertDialog.Builder(this).setTitle("연결 해제").setMessage("저장된 인증키를 삭제합니다. 거래 기록과 일지는 기기에 남습니다.").setNegativeButton("취소",null).setPositiveButton("삭제",(d,w)->{notice=secrets.clear()?"인증키를 삭제했습니다.":"인증키 삭제를 완료하지 못했습니다.";render();}).show(),false);
+        if(hasSaved) button(content,"인증키 삭제",()->new AlertDialog.Builder(this).setTitle("연결 해제").setMessage("저장된 인증키를 삭제합니다. 거래 기록과 일지는 기기에 남습니다.").setNegativeButton("취소",null).setPositiveButton("삭제",(d,w)->{notice=secrets.clear()?"인증키를 삭제했습니다.":"인증키 삭제를 완료하지 못했습니다.";resetQuotes();render();}).show(),false);
+    }
+    private android.net.Network currentNetwork() {
+        android.net.ConnectivityManager manager=(android.net.ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+        return manager==null?null:manager.getActiveNetwork();
+    }
+    private String networkLabel(android.net.Network network) {
+        android.net.ConnectivityManager manager=(android.net.ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+        android.net.NetworkCapabilities c=manager==null||network==null?null:manager.getNetworkCapabilities(network);
+        if(c==null)return "네트워크";
+        if(c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN))return "VPN";
+        if(c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI))return "Wi-Fi";
+        if(c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR))return "모바일 데이터 (LTE/5G)";
+        return "네트워크";
+    }
+    private void paintIp() {
+        if(ipView!=null)ipView.setText(ipStatus);
+        if(ipCheckButton!=null)ipCheckButton.setEnabled(!busy && !ipLoading);
+        if(ipCopyButton!=null)ipCopyButton.setEnabled(!busy && !ipLoading && !publicIp.isEmpty());
+    }
+    private void lookupIp() {
+        if(ipLoading || isDestroyed())return;
+        final android.net.Network network=currentNetwork();final String connection=networkLabel(network);
+        ipLoading=true;publicIp="";ipStatus="공인 IP 확인 중…";paintIp();
+        ipWorker.execute(()->{
+            String address="";
+            try{address=new PublicIpClient().fetch();}catch(Exception ignored){}
+            final String result=address;
+            runOnUiThread(()->{
+                if(isDestroyed() || isFinishing())return;
+                ipLoading=false;
+                if(!java.util.Objects.equals(network,currentNetwork()))ipStatus="조회 중 연결망이 바뀌었습니다. 다시 조회해 주세요.";
+                else if(result.isEmpty())ipStatus="공인 IP를 확인하지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요.";
+                else {publicIp=result;ipStatus=result+"\n"+connection+" · "+LocalTime.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("HH:mm:ss"))+" 확인";}
+                paintIp();
+            });
+        });
     }
     private void pickDate(boolean start) {
         LocalDate date=LocalDate.parse(start?from:to,DateTimeFormatter.BASIC_ISO_DATE);

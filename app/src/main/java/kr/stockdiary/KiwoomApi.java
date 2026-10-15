@@ -20,8 +20,10 @@ public final class KiwoomApi {
     public static final class ApiException extends IOException {
         /** 연결 끊김·서버 과부하·요청 한도처럼 잠시 뒤 다시 하면 될 수 있는 오류. */
         final boolean temporary;
+        final int code;
         public ApiException(String message) { this(message,false); }
-        ApiException(String message,boolean temporary) { super(message); this.temporary=temporary; }
+        ApiException(String message,boolean temporary) { this(message,temporary,-1); }
+        ApiException(String message,boolean temporary,int code) { super(message); this.temporary=temporary; this.code=code; }
     }
     public static final class Snapshot {
         public final JSONArray trades, profits, holdings, symbolProfits;
@@ -74,6 +76,10 @@ public final class KiwoomApi {
         }
         return stage(id)+" 실패 (코드 "+code+(embedded==null?" · 상세코드 없음":" · 상세 "+embedded)+"). "+help;
     }
+    static int specificCode(int code,String message) {
+        java.util.regex.Matcher m=java.util.regex.Pattern.compile("\\[\\s*(\\d{3,5})\\s*:|CODE\\s*=\\s*(\\d{3,5})",java.util.regex.Pattern.CASE_INSENSITIVE).matcher(message);
+        return m.find()?Integer.parseInt(m.group(1)!=null?m.group(1):m.group(2)):code;
+    }
     /** 조회만 하므로 같은 요청을 다시 보내도 안전하다. 일시적 오류는 2·4·8초 쉬고 최대 3번 다시 보낸다. */
     private Response call(String path, String id, String token, JSONObject body, String next) throws Exception {
         for (int attempt=0;;attempt++) {
@@ -109,7 +115,7 @@ public final class KiwoomApi {
             if (!tokenWithoutCode && (!result.body.has("return_code") || result.body.getInt("return_code")!=0)) {
                 // Do not expose server text that might contain credentials or account details.
                 String reason=errorDescription(id,result.body.optInt("return_code",-1),result.body.optString("return_msg"));
-                throw new ApiException(reason,reason.contains("요청 한도"));
+                throw new ApiException(reason,reason.contains("요청 한도"),specificCode(result.body.optInt("return_code",-1),result.body.optString("return_msg")));
             }
             result.continuation=c.getHeaderField("cont-yn"); result.next=c.getHeaderField("next-key");
             return result;
@@ -187,7 +193,9 @@ public final class KiwoomApi {
     }
     /** 현재가(ka10001). 키움은 전일 대비 방향을 부호로 붙이므로 절댓값을 쓴다. */
     public java.math.BigDecimal currentPrice(String token,String code) throws Exception {
-        java.math.BigDecimal price=Numbers.parse(call("/api/dostk/stkinfo","ka10001",token,new JSONObject().put("stk_cd",code),"").body.optString("cur_prc")).abs();
+        String normalized=Pairing.code(code);
+        if(!normalized.matches("[0-9A-Z]{6}")) throw new ApiException("현재가 조회 실패: 종목코드 형식이 올바르지 않습니다.");
+        java.math.BigDecimal price=Numbers.parse(call("/api/dostk/stkinfo","ka10001",token,new JSONObject().put("stk_cd",normalized),"").body.optString("cur_prc")).abs();
         if(price.signum()==0) throw new ApiException(stage("ka10001")+" 실패: 현재가가 비어 있습니다.");
         return price;
     }

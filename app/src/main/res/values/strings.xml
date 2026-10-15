@@ -1,0 +1,4 @@
+<resources>
+    <string name="quote_live">현재가 %1$s원 · %2$s 조회 · 10초마다 갱신</string>
+    <string name="quote_saved">현재가 %1$s원 · 마지막 동기화 기준</string>
+</resources>
