@@ -24,6 +24,21 @@ public class QuoteClientTest {
         response("{\"return_code\":0}");
         try{api.currentPrice("token","005930");fail("Missing price accepted");}catch(KiwoomApi.ApiException e){assertTrue(e.getMessage().contains("비어"));}
     }
+    @Test public void hynixMarketSuffixIsSentWithoutChangingTheBaseSymbol() throws Exception {
+        for(String code:new String[]{" A000660 ","A000660_NX","000660_AL"}) {
+            response("{\"return_code\":0,\"stk_cd\":\"A000660\",\"cur_prc\":\"+1,306,000\"}");
+            assertEquals(new BigDecimal("1306000"),api.currentPrice("token",code));
+            RecordedRequest r=server.takeRequest();String requested=new JSONObject(r.getBody().readUtf8()).getString("stk_cd");
+            assertEquals(code.contains("_NX")?"000660_NX":code.contains("_AL")?"000660_AL":"000660",requested);
+        }
+        assertEquals("000660_NX",QuoteMarket.NXT.requestCode("A000660"));
+        assertEquals("000660_AL",QuoteMarket.SOR.requestCode("000660"));
+    }
+    @Test public void differentResponseSymbolCannotBeShownAsTheRequestedStock() throws Exception {
+        response("{\"return_code\":0,\"stk_cd\":\"A005930\",\"cur_prc\":\"70000\"}");
+        try{api.currentPrice("token","000660");fail("Wrong stock accepted");}
+        catch(KiwoomApi.ApiException e){assertTrue(e.getMessage().contains("종목코드"));}
+    }
     @Test public void expiredTokenIsRenewedOnceThenPriceIsRetried() throws Exception {
         response("{\"token\":\"old\"}");response("{\"return_code\":3,\"return_msg\":\"인증 실패[8005:expired]\"}");
         response("{\"token\":\"new\"}");response("{\"return_code\":0,\"cur_prc\":\"70500\"}");

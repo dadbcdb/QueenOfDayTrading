@@ -36,6 +36,7 @@ public class MainActivity extends Activity {
     private final Handler quoteHandler=new Handler(Looper.getMainLooper());
     private final Runnable quoteTick=()->{if(quoteVisible && visibleQuoteChart!=null)showQuote(visibleQuoteChart,visibleQuoteLine,visibleQuoteCode,true);};
     private static final long QUOTE_INTERVAL=10_000;
+    private QuoteMarket quoteMarket=QuoteMarket.KRX;
     private final ExecutorService quoteWorker=Executors.newSingleThreadExecutor();
     private final ExecutorService ipWorker=Executors.newSingleThreadExecutor();
     private String publicIp="",ipStatus="IP 확인을 눌러 조회하세요.";private boolean ipLoading;
@@ -47,6 +48,7 @@ public class MainActivity extends Activity {
         scope=getPreferences(0).getString("scope","unlinked"); mock=getPreferences(0).getBoolean("mock",false);
         from=getPreferences(0).getString("from",from); to=getPreferences(0).getString("to",to);
         chartCode=getPreferences(0).getString("chartCode","");
+        quoteMarket=QuoteMarket.saved(getPreferences(0).getString("quoteMarket","KRX"));
         if(state!=null) { tab=state.getInt("tab",0); chartCode=state.getString("chartCode",chartCode); cursorFill=state.getString("cursorFill",""); }
         if(state==null) splash(); else render();
     }
@@ -241,6 +243,13 @@ public class MainActivity extends Activity {
             pick.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() { public void onItemSelected(AdapterView<?> p,View v,int pos,long id) { if(!codes.get(pos).equals(chartCode)) { chartCode=codes.get(pos); getPreferences(0).edit().putString("chartCode",chartCode).apply(); render(); } } public void onNothingSelected(AdapterView<?> p) {} });
         } else c.addView(text(names.get(chartCode),17,TEXT));
         c.addView(text("▲ 매수  ▼ 매도  숫자는 수량 · 실선은 짝 · 점선은 남은 묶음. 그래프를 끌어 시점을 고르세요.",11,MUTED));
+        c.addView(text("현재가 조회 거래소",13,MUTED));
+        Spinner marketPick=new Spinner(this);String[] markets={"KRX","NXT","통합(SOR)"};
+        marketPick.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,markets));marketPick.setSelection(quoteMarket.ordinal());c.addView(marketPick);
+        marketPick.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onItemSelected(AdapterView<?> p,View v,int pos,long id){
+            QuoteMarket chosen=QuoteMarket.values()[pos];if(chosen!=quoteMarket){quoteMarket=chosen;getPreferences(0).edit().putString("quoteMarket",chosen.name()).apply();resetQuotes();render();}
+        }public void onNothingSelected(AdapterView<?> p){}});
+        c.addView(text("영웅문과 같은 거래소를 선택한 뒤 새로고침해 비교하세요. 현재가는 10초 주기 조회입니다.",11,MUTED));
         TextView quoteLine=text("",13,LotChart.QUOTE); c.addView(quoteLine);
         LotChart chart=new LotChart(this); c.addView(chart,new LinearLayout.LayoutParams(-1,-2));
         showQuote(chart,quoteLine,chartCode);
@@ -324,10 +333,11 @@ public class MainActivity extends Activity {
         if(quoteVisible && visibleQuoteChart!=null && !scope.equals("demo-v1"))quoteHandler.postDelayed(quoteTick,Math.max(1000,delay));
     }
     private void paintQuote(LotChart chart,TextView line,String code,String error) {
-        BigDecimal cached=quotes.get(code);Long when=quoteAt.get(code);
+        String requestCode=quoteMarket.requestCode(code);
+        BigDecimal cached=quotes.get(requestCode);Long when=quoteAt.get(requestCode);
         if(cached!=null && when!=null) {
             chart.setQuote(cached);
-            line.setText(getString(R.string.quote_live,Numbers.format(cached),Instant.ofEpochMilli(when).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("HH:mm:ss"))));
+            line.setText(getString(R.string.quote_live,Numbers.format(cached),Instant.ofEpochMilli(when).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("HH:mm:ss")),quoteMarket.label+(mock?" · 모의":""),code));
         } else fallbackQuote(chart,line,code);
         if(!error.isEmpty()){line.append("\n");line.append(error);}
     }
@@ -336,9 +346,10 @@ public class MainActivity extends Activity {
         visibleQuoteChart=chart;visibleQuoteLine=line;visibleQuoteCode=code;
         paintQuote(chart,line,code,"");
         if(scope.equals("demo-v1")){line.setText("샘플 데이터 · 현재가 조회 없음");return;}
-        Long when=quoteAt.get(code);
+        final String requestCode=quoteMarket.requestCode(code);
+        Long when=quoteAt.get(requestCode);
         if(!force && when!=null && System.currentTimeMillis()-when<QUOTE_INTERVAL){scheduleQuote(QUOTE_INTERVAL-(System.currentTimeMillis()-when));return;}
-        if(quoteLoading.contains(code))return;
+        if(quoteLoading.contains(requestCode))return;
         final JSONObject credentials;
         try {
             credentials=loadQuoteCredentials();
@@ -347,18 +358,18 @@ public class MainActivity extends Activity {
                 paintQuote(chart,line,code,"선택한 계좌와 저장된 인증키가 다릅니다. 계좌 설정에서 연결을 확인해 주세요.");return;
             }
         } catch(Exception e){paintQuote(chart,line,code,"저장된 인증키를 읽지 못했습니다. 계좌 설정에서 다시 저장해 주세요.");return;}
-        if(quotes.get(code)==null)line.setText("현재가 불러오는 중…");
-        quoteLoading.add(code);quoteHandler.removeCallbacks(quoteTick);
+        if(quotes.get(requestCode)==null)line.setText("현재가 불러오는 중…");
+        quoteLoading.add(requestCode);quoteHandler.removeCallbacks(quoteTick);
         final long generation=quoteGeneration;final String selectedScope=scope;final QuoteClient client=quoteClient;
         quoteWorker.execute(()->{
             BigDecimal price=null;String error="";
-            try {price=client.price(credentials.getString("key"),credentials.getString("secret"),credentials.optBoolean("mock"),code);}
+            try {price=client.price(credentials.getString("key"),credentials.getString("secret"),credentials.optBoolean("mock"),requestCode);}
             catch(Exception e){error=reason(e);}
             final BigDecimal result=price;final String failure=error;
             runOnUiThread(()->{
                 if(isDestroyed() || isFinishing() || generation!=quoteGeneration || !scope.equals(selectedScope))return;
-                quoteLoading.remove(code);
-                if(result!=null){quotes.put(code,result);quoteAt.put(code,System.currentTimeMillis());}
+                quoteLoading.remove(requestCode);
+                if(result!=null){quotes.put(requestCode,result);quoteAt.put(requestCode,System.currentTimeMillis());}
                 if(visibleQuoteChart!=null && visibleQuoteCode.equals(code)){
                     paintQuote(visibleQuoteChart,visibleQuoteLine,code,failure);scheduleQuote(QUOTE_INTERVAL);
                 }
@@ -366,9 +377,12 @@ public class MainActivity extends Activity {
         });
     }
     private void fallbackQuote(LotChart chart,TextView line,String code) {
+        chart.setQuote(null);
+        if(quoteMarket!=QuoteMarket.KRX){line.setText(getString(R.string.quote_unavailable,quoteMarket.label,code));return;}
         try { for(JSONObject h:db.rows("holdings",scope)) if(Pairing.code(h.optString("stk_cd")).equals(code)) {
                 BigDecimal p=Numbers.parse(h.optString("cur_prc")).abs(); if(p.signum()==0) break;
-                chart.setQuote(p); line.setText(getString(R.string.quote_saved,Numbers.format(p))); return; } }
+                JSONObject meta=db.meta(scope);String saved=meta==null?"확인 시각 없음":Instant.ofEpochMilli(meta.getLong("synced")).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("MM.dd HH:mm"));
+                chart.setQuote(p); line.setText(getString(R.string.quote_saved,Numbers.format(p),code,saved)); return; } }
         catch(Exception ignored) {}
         line.setText("현재가 조회 전 · 저장된 가격 없음");
     }

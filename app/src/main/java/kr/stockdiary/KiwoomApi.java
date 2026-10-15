@@ -193,9 +193,12 @@ public final class KiwoomApi {
     }
     /** 현재가(ka10001). 키움은 전일 대비 방향을 부호로 붙이므로 절댓값을 쓴다. */
     public java.math.BigDecimal currentPrice(String token,String code) throws Exception {
-        String normalized=Pairing.code(code);
-        if(!normalized.matches("[0-9A-Z]{6}")) throw new ApiException("현재가 조회 실패: 종목코드 형식이 올바르지 않습니다.");
-        java.math.BigDecimal price=Numbers.parse(call("/api/dostk/stkinfo","ka10001",token,new JSONObject().put("stk_cd",normalized),"").body.optString("cur_prc")).abs();
+        String normalized=QuoteMarket.normalizeRequest(code);
+        JSONObject response=call("/api/dostk/stkinfo","ka10001",token,new JSONObject().put("stk_cd",normalized),"").body;
+        String returned=response.optString("stk_cd").trim();
+        if(!returned.isEmpty() && !QuoteMarket.baseCode(returned).equals(QuoteMarket.baseCode(normalized)))
+            throw new ApiException("현재가 조회 실패: 응답 종목코드가 요청한 종목과 다릅니다.");
+        java.math.BigDecimal price=Numbers.parse(response.optString("cur_prc")).abs();
         if(price.signum()==0) throw new ApiException(stage("ka10001")+" 실패: 현재가가 비어 있습니다.");
         return price;
     }

@@ -1,4 +1,5 @@
 <resources>
-    <string name="quote_live">현재가 %1$s원 · %2$s 조회 · 10초마다 갱신</string>
-    <string name="quote_saved">현재가 %1$s원 · 마지막 동기화 기준</string>
+    <string name="quote_live">현재가 %1$s원 · %3$s\n종목 %4$s · %2$s 조회 · 10초마다 갱신</string>
+    <string name="quote_saved">저장 가격 %1$s원 · KRX\n종목 %2$s · %3$s 마지막 동기화 기준</string>
+    <string name="quote_unavailable">%1$s 현재가 조회 전 · 종목 %2$s\n이 거래소에서 조회한 가격이 없습니다.</string>
 </resources>

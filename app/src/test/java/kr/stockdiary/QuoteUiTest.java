@@ -20,7 +20,7 @@ import java.util.function.BooleanSupplier;
 @Config(sdk=28)
 public class QuoteUiTest {
     public static class QuoteActivity extends MainActivity {
-        final AtomicInteger requests=new AtomicInteger(); volatile boolean reject;
+        final AtomicInteger requests=new AtomicInteger(); volatile boolean reject;volatile String lastCode;
         @Override public void onCreate(Bundle state) {
             try {getPreferences(0).edit().clear().putString("scope",Records.scope("test",false)).commit();}
             catch(Exception e){throw new RuntimeException(e);}
@@ -29,7 +29,7 @@ public class QuoteUiTest {
         @Override JSONObject loadQuoteCredentials() throws Exception {return new JSONObject().put("key","test").put("secret","test-secret").put("mock",false);}
         @Override QuoteClient newQuoteClient() {
             return new QuoteClient(){@Override BigDecimal price(String k,String s,boolean m,String c) throws Exception {
-                int n=requests.incrementAndGet();if(reject)throw new KiwoomApi.ApiException("현재가 조회 실패 (코드 3 · 상세 8001)");
+                lastCode=c;int n=requests.incrementAndGet();if(reject)throw new KiwoomApi.ApiException("현재가 조회 실패 (코드 3 · 상세 8001)");
                 return BigDecimal.valueOf(70000+n);
             }};
         }
@@ -43,6 +43,11 @@ public class QuoteUiTest {
         long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(4);
         while(!check.getAsBoolean() && System.nanoTime()<until){ShadowLooper.idleMainLooper();Thread.sleep(10);}
         ShadowLooper.idleMainLooper();assertTrue("Quote worker did not update the screen",check.getAsBoolean());
+    }
+    private android.widget.Spinner spinner(View root) {
+        if(root instanceof android.widget.Spinner)return (android.widget.Spinner)root;
+        if(root instanceof ViewGroup)for(int i=0;i<((ViewGroup)root).getChildCount();i++){android.widget.Spinner s=spinner(((ViewGroup)root).getChildAt(i));if(s!=null)return s;}
+        return null;
     }
     @Test public void priceRefreshesWhileVisibleStopsInBackgroundAndShowsFailures() throws Exception {
         RuntimeEnvironment.getApplication().deleteDatabase("diary.db");
@@ -65,6 +70,10 @@ public class QuoteUiTest {
             activity.reject=true;find(activity.getWindow().getDecorView(),"현재가 새로고침",false).performClick();
             await(()->find(activity.getWindow().getDecorView(),"상세 8001",true)!=null);
             assertNotNull("Last successful price must survive a failed refresh",find(activity.getWindow().getDecorView(),"현재가 70,004원",true));
+            activity.reject=false;spinner(activity.getWindow().getDecorView()).setSelection(1);ShadowLooper.idleMainLooper();
+            await(()->find(activity.getWindow().getDecorView(),"현재가 70,006원 · NXT",true)!=null);
+            assertEquals("005930_NX",activity.lastCode);
+            assertNull("KRX cached quote must not be used for NXT",find(activity.getWindow().getDecorView(),"현재가 70,004원",true));
         }
     }
 }
