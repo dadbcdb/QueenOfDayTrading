@@ -56,6 +56,20 @@ public class DiaryDbTest {
         db.setPairs("real","20261002:000000001",Collections.emptyMap());assertFalse(db.pairing("real").pairs.get(0).manual);
         db.clearScope("real");assertTrue(db.openingLots("real").isEmpty());assertTrue(db.manualPairs("real").isEmpty());
     }
+    @Test public void pairStartDropsEarlierFillsOfThatSymbolOnly() throws Exception {
+        JSONArray trades=new JSONArray()
+            .put(new JSONObject().put("trde_dt","20260601").put("trde_no","1").put("stk_cd","A005930").put("stk_nm","삼성전자").put("io_tp_nm","매수").put("trde_qty_jwa_cnt","5").put("trde_unit","50000"))
+            .put(new JSONObject().put("trde_dt","20260701").put("trde_no","2").put("stk_cd","A005930").put("stk_nm","삼성전자").put("io_tp_nm","매수").put("trde_qty_jwa_cnt","5").put("trde_unit","60000"))
+            .put(new JSONObject().put("trde_dt","20260801").put("trde_no","3").put("stk_cd","A005930").put("stk_nm","삼성전자").put("io_tp_nm","매도").put("trde_qty_jwa_cnt","10").put("trde_unit","70000"))
+            .put(new JSONObject().put("trde_dt","20260601").put("trde_no","4").put("stk_cd","A000660").put("stk_nm","SK하이닉스").put("io_tp_nm","매수").put("trde_qty_jwa_cnt","1").put("trde_unit","100000"));
+        db.snapshot("real","20260101","20261009",new KiwoomApi.Snapshot(trades,new JSONArray(),new JSONArray(),new JSONObject()));
+        db.setPairs("real","20260801:3",Collections.singletonMap("20260601:1",5L));
+        db.setPairStart("real","005930","20260701:2");
+        Pairing.Result r=db.pairing("real");
+        assertNull(r.fill("20260601:1"));assertNotNull(r.fill("20260601:4"));
+        assertTrue(r.issues.isEmpty());assertEquals(1,r.pairs.size());assertEquals(Long.valueOf(5),r.unmatched.get("20260801:3"));
+        db.setPairStart("real","005930",null);assertEquals(2,db.pairing("real").pairs.size());
+    }
     @Test public void version1DatabaseUpgradesWithoutLosingTrades() throws Exception {
         db.close(); android.content.Context ctx=RuntimeEnvironment.getApplication(); ctx.deleteDatabase("diary.db");
         android.database.sqlite.SQLiteDatabase old=android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(ctx.getDatabasePath("diary.db"),null);
@@ -64,6 +78,40 @@ public class DiaryDbTest {
         old.setVersion(1); old.close();
         db=new DiaryDb(ctx);
         assertEquals(1,db.rows("trades","real").size());assertTrue(db.manualPairs("real").isEmpty());assertTrue(db.openingLots("real").isEmpty());
+    }
+    @Test public void settledTradeReplacesPendingFillAndKeepsItsJournal() throws Exception {
+        JSONObject fill=new JSONObject().put("ord_no","0000050").put("stk_cd","A005930").put("stk_nm","삼성전자").put("io_tp_nm","현금매수").put("cntr_qty","3").put("cntr_uv","70000");
+        JSONObject pending=Records.pendingTrade("20261008",fill,new java.util.HashMap<>());
+        db.snapshot("real","20261001","20261008",new KiwoomApi.Snapshot(new JSONArray().put(pending),new JSONArray(),new JSONArray(),new JSONObject()));
+        db.note("real","p:20261008:0000050","눌림목 매수");
+        // 결제 전이면 같은 기간을 다시 받아도 일지가 붙은 채로 남는다.
+        db.snapshot("real","20261001","20261008",new KiwoomApi.Snapshot(new JSONArray().put(pending),new JSONArray(),new JSONArray(),new JSONObject()));
+        assertEquals(1,db.rows("trades","real").size());assertEquals("눌림목 매수",db.note("real","p:20261008:0000050"));
+        JSONObject settled=new JSONObject().put("trde_dt","20261013").put("trde_no","000000007").put("cntr_dt","20261008").put("stk_cd","A005930").put("stk_nm","삼성전자").put("io_tp_nm","매수").put("trde_qty_jwa_cnt","3").put("trde_unit","70,000");
+        db.snapshot("real","20261009","20261013",new KiwoomApi.Snapshot(new JSONArray().put(settled),new JSONArray(),new JSONArray(),new JSONObject()));
+        assertEquals(1,db.rows("trades","real").size());assertEquals("000000007",db.rows("trades","real").get(0).getString("trde_no"));
+        assertEquals("눌림목 매수",db.note("real","20261013:000000007"));assertEquals("",db.note("real","p:20261008:0000050"));
+    }
+    private static String ranges(java.util.List<String[]> list) { StringBuilder b=new StringBuilder(); for(String[] r:list) b.append(r[0]).append('-').append(r[1]).append(' '); return b.toString().trim(); }
+    @Test public void onlyMissingDaysAreFetchedAndTodayStaysOpen() throws Exception {
+        assertEquals("20261001-20261013",ranges(db.missing("real","20261001","20261013")));
+        db.snapshot("real","20261005","20261013",snapshot("20261006","000000001","10"),"20261012");
+        assertEquals("20261005-20261012",ranges(db.covered("real")));
+        assertEquals("20261001-20261004 20261013-20261013",ranges(db.missing("real","20261001","20261013")));
+        db.snapshot("real","20261001","20261004",snapshot("20261002","000000002","10"),"20261012");
+        assertEquals("20261001-20261012",ranges(db.covered("real")));
+        assertEquals("",ranges(db.missing("real","20261003","20261010")));
+    }
+    @Test public void legacyMetaCountsAsCoveredUntilTheDayBeforeSync() throws Exception {
+        android.content.ContentValues v=new android.content.ContentValues(); v.put("scope","real");
+        v.put("raw",new JSONObject().put("from","20250101").put("to","20261013").put("synced",System.currentTimeMillis()).toString());
+        db.getWritableDatabase().insert("meta",null,v);
+        String yesterday=java.time.LocalDate.now(java.time.ZoneId.of("Asia/Seoul")).minusDays(1).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+        assertEquals("20250101-"+(yesterday.compareTo("20261013")<0?yesterday:"20261013"),ranges(db.covered("real")));
+    }
+    @Test public void longGapsSplitIntoYearChunksNewestFirst() {
+        java.util.List<String[]> gaps=new java.util.ArrayList<>(); gaps.add(new String[]{"20240101","20261013"});
+        assertEquals("20251014-20261013 20241014-20251013 20240101-20241013",ranges(Records.chunks(gaps)));
     }
     @Test public void brokerRemovedTradeStillHasAnAccessibleJournal() throws Exception {
         db.snapshot("real","20261001","20261009",snapshot("20261002","000000001","10"));db.note("real","20261002:000000001","복기 기록");

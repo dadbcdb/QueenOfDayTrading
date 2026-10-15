@@ -9,11 +9,15 @@ public final class Pairing {
     private Pairing() {}
 
     public static final class Fill {
-        public final String id,code,name,day,side; public final long seq,qty; public final BigDecimal price; public final boolean opening;
-        public Fill(String id,String code,String name,String day,long seq,String side,BigDecimal price,long qty,boolean opening) {
-            this.id=id;this.code=code;this.name=name;this.day=day;this.seq=seq;this.side=side;this.price=price;this.qty=qty;this.opening=opening;
+        /** time: 체결 시각(없으면 주문 시각) HH:mm:ss. 모르면 빈 값. */
+        public final String id,code,name,day,side,time; public final long seq,qty; public final BigDecimal price; public final boolean opening;
+        public Fill(String id,String code,String name,String day,long seq,String side,BigDecimal price,long qty,boolean opening) { this(id,code,name,day,"",seq,side,price,qty,opening); }
+        public Fill(String id,String code,String name,String day,String time,long seq,String side,BigDecimal price,long qty,boolean opening) {
+            this.id=id;this.code=code;this.name=name;this.day=day;this.time=time==null?"":time;this.seq=seq;this.side=side;this.price=price;this.qty=qty;this.opening=opening;
         }
-        boolean before(Fill o) { int c=day.compareTo(o.day); if(c!=0) return c<0; if(opening!=o.opening) return opening; return seq<o.seq; }
+        /** 날짜 → 기초 물량 먼저 → 주문 시각(모르면 그날 맨 뒤) → 번호 → id. */
+        static final Comparator<Fill> ORDER=Comparator.comparing((Fill f)->f.day).thenComparing(f->!f.opening).thenComparing(f->f.time.isEmpty()?"99":f.time).thenComparingLong(f->f.seq).thenComparing(f->f.id);
+        boolean before(Fill o) { return ORDER.compare(this,o)<0; }
     }
     public static final class Pair {
         public final Fill buy,sell; public final long qty; public final boolean manual;
@@ -57,7 +61,7 @@ public final class Pairing {
         if(side.equals("기타") || qty<=0) return null;
         String day=r.optString("cntr_dt"); if(!day.matches("\\d{8}")) day=r.getString("trde_dt");
         String code=code(r.optString("stk_cd"));
-        return new Fill(Records.tradeId(r),code,r.optString("stk_nm",code),day,Numbers.parse(r.optString("trde_no")).longValue(),side,Numbers.parse(r.optString("trde_unit")),qty,false);
+        return new Fill(Records.tradeId(r),code,r.optString("stk_nm",code),day,Records.fillTime(r),Numbers.parse(r.optString("trde_no")).longValue(),side,Numbers.parse(r.optString("trde_unit")),qty,false);
     }
     public static Fill fromOpening(JSONObject r) throws Exception {
         String code=code(r.getString("stk_cd"));
@@ -67,7 +71,7 @@ public final class Pairing {
     /** manual: 매도 id → (매수 id → 수량) */
     public static Result run(List<Fill> input,Map<String,Map<String,Long>> manual) {
         Result result=new Result(); result.fills.addAll(input);
-        result.fills.sort((a,b)->a.before(b)?-1:b.before(a)?1:a.id.compareTo(b.id));
+        result.fills.sort(Fill.ORDER);
         Map<String,Fill> byId=new HashMap<>(); Map<String,Long> left=new HashMap<>();
         for(Fill f:result.fills) { byId.put(f.id,f); left.put(f.id,f.qty); }
         // 1) 수동 지정 짝을 먼저 확보한다.

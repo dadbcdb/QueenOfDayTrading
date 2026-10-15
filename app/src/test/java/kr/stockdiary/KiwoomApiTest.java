@@ -31,6 +31,17 @@ public class KiwoomApiTest {
                         case "kt00015":
                             if(next.isEmpty() || loop) {response.setHeader("cont-yn","Y");response.setHeader("next-key","page2");}
                             r.put("trst_ovrl_trde_prps_array",new JSONArray().put(new JSONObject().put("trde_dt","20261002").put("trde_no",next.isEmpty()?"1":"2"))); break;
+                        case "kt00007": {
+                            JSONArray fills=new JSONArray();
+                            if(new JSONObject(body).getString("ord_dt").equals("20261008")) fills
+                                .put(new JSONObject().put("ord_no","0000050").put("stk_cd","A069500").put("stk_nm","KODEX 200").put("io_tp_nm","현금매수").put("cntr_qty","0000000003").put("cntr_uv","0000004900").put("dmst_stex_tp","KRX"))
+                                .put(new JSONObject().put("ord_no","0000051").put("stk_cd","A069500").put("io_tp_nm","현금매도").put("cntr_qty","0000000000").put("cntr_uv","0000000000"));
+                            r.put("acnt_ord_cntr_prps_dtl",fills); break;
+                        }
+                        case "kt00009":
+                            r.put("acnt_ord_cntr_prst_array",new JSONArray()
+                                .put(new JSONObject().put("ord_no","50").put("cntr_qty","1").put("cntr_tm","10:01:00"))
+                                .put(new JSONObject().put("ord_no","0000050").put("cntr_qty","2").put("cntr_tm","14:59:30"))); break;
                         case "ka10074": r.put("dt_rlzt_pl",new JSONArray().put(new JSONObject().put("dt","20261002").put("tdy_sel_pl","179419").put("tdy_trde_cmsn","940").put("tdy_trde_tax","852")));break;
                         case "ka10073": r.put("dt_stk_rlzt_pl",new JSONArray().put(new JSONObject().put("dt","20261002").put("stk_cd","A005930").put("tdy_sel_pl","179419")));break;
                         case "kt00004": r.put("stk_acnt_evlt_prst",new JSONArray()).put("entr","000000123456");break;
@@ -45,17 +56,35 @@ public class KiwoomApiTest {
     @After public void teardown() throws Exception {server.shutdown();}
     @Test public void paginationAndDomesticQueryContracts() throws Exception {
         KiwoomApi.Snapshot s=new KiwoomApi(base).sync("key-test","secret-test","20261001","20261009");
-        assertEquals(2,s.trades.length());assertEquals(1,s.profits.length());assertEquals(0,s.holdings.length());
+        assertEquals(3,s.trades.length());assertEquals(1,s.pending);assertEquals(1,s.profits.length());assertEquals(0,s.holdings.length());
         assertEquals("000000123456",s.balance.getString("entr"));
-        assertEquals(Arrays.asList("/oauth2/token:null","/api/dostk/acnt:kt00015","/api/dostk/acnt:kt00015","/api/dostk/acnt:ka10074","/api/dostk/acnt:ka10073","/api/dostk/acnt:kt00004"),calls);
+        // 결제된 마지막 날(10/02) 이후 평일만 체결 내역으로 채운다.
+        assertEquals(Arrays.asList("/oauth2/token:null","/api/dostk/acnt:kt00015","/api/dostk/acnt:kt00015",
+            "/api/dostk/acnt:kt00007","/api/dostk/acnt:kt00007","/api/dostk/acnt:kt00007","/api/dostk/acnt:kt00007","/api/dostk/acnt:kt00009","/api/dostk/acnt:kt00007",
+            "/api/dostk/acnt:ka10074","/api/dostk/acnt:ka10073","/api/dostk/acnt:kt00004"),calls);
         JSONObject request=new JSONObject(bodies.get(1));assertEquals("3",request.getString("tp")); assertEquals("1",request.getString("gds_tp"));assertEquals("%",request.getString("dmst_stex_tp"));
-        assertEquals("page2",continuations.get(1));assertEquals("KRX",new JSONObject(bodies.get(5)).getString("dmst_stex_tp"));assertEquals(1,s.symbolProfits.length());
+        assertEquals("20261005",new JSONObject(bodies.get(3)).getString("ord_dt"));assertEquals("4",new JSONObject(bodies.get(3)).getString("qry_tp"));
+        JSONObject pending=s.trades.getJSONObject(2);
+        assertEquals("p:20261008:0000050",Records.tradeId(pending));assertEquals("매수",Records.side(pending));assertEquals("14700",pending.getString("trde_amt"));
+        // 주문번호 앞자리 0이 달라도 같은 주문으로 보고, 마지막 체결 시각을 쓴다.
+        assertEquals("14:59:30",Records.fillTime(pending));
+        assertEquals("page2",continuations.get(1));assertEquals("KRX",new JSONObject(bodies.get(11)).getString("dmst_stex_tp"));assertEquals(1,s.symbolProfits.length());
         assertEquals("key-test",new JSONObject(bodies.get(0)).getString("appkey"));
     }
     @Test public void errorDoesNotExposeResponseOrCredentials() throws Exception {
         fail=true;
         try {new KiwoomApi(base).sync("key-test","secret-test","20261001","20261009");fail("Expected error");}
         catch(KiwoomApi.ApiException e) {assertTrue(e.getMessage().contains("401"));assertFalse(e.getMessage().contains("secret-test"));}
+    }
+    @Test public void temporaryErrorsAreRetriedButRejectionsAreNot() throws Exception {
+        final int[] hits={0};
+        server.setDispatcher(new Dispatcher(){@Override public MockResponse dispatch(RecordedRequest r){ hits[0]++; return hits[0]<3?new MockResponse().setResponseCode(503):new MockResponse().setBody("{\"token\":\"t\"}"); }});
+        KiwoomApi api=new KiwoomApi(base); api.retryDelay=1;
+        assertEquals("t",api.authenticate("k","s")); assertEquals(3,hits[0]);
+        server.shutdown(); fail=true; setup();
+        KiwoomApi rejected=new KiwoomApi(base); rejected.retryDelay=1;
+        try {rejected.authenticate("k","s");fail("Expected error");} catch(KiwoomApi.ApiException e) {assertTrue(e.getMessage().contains("401"));}
+        assertEquals(1,calls.size());
     }
     @Test public void validTokenWithoutOptionalReturnCodeIsAccepted() throws Exception {
         server.setDispatcher(new Dispatcher(){@Override public MockResponse dispatch(RecordedRequest r){return new MockResponse().setBody("{\"token\":\"test-token\",\"token_type\":\"bearer\",\"expires_dt\":\"20261010120000\"}");}});
@@ -83,6 +112,29 @@ public class KiwoomApiTest {
         KiwoomApi api=new KiwoomApi(base);api.cancel();
         try {api.sync("k","s","20261001","20261009");fail("Expected cancellation");}catch(InterruptedException expected){}
         assertTrue(calls.isEmpty());
+    }
+    @Test public void placeholderRowForEmptyPeriodIsDropped() throws Exception {
+        JSONArray rows=new JSONArray()
+            .put(new JSONObject().put("dt","").put("tdy_sel_pl","").put("tdy_trde_cmsn","000000000").put("tdy_trde_tax","0").put("rlzt_pl_rt","0.00%"))
+            .put(new JSONObject().put("dt","20261002").put("tdy_sel_pl","0").put("tdy_trde_cmsn","0").put("tdy_trde_tax","0"))
+            .put(new JSONObject().put("dt","").put("tdy_sel_pl","-5350"));
+        JSONArray kept=KiwoomApi.withoutBlankRows(rows,"dt");
+        // 날짜가 있는 행과, 날짜가 없어도 값이 있는 행(검증에서 걸러야 함)은 남긴다.
+        assertEquals(2,kept.length());assertEquals("20261002",kept.getJSONObject(0).getString("dt"));assertEquals("-5350",kept.getJSONObject(1).getString("tdy_sel_pl"));
+    }
+    @Test public void orderTimesAttachToSettledTradesAndDecideSameDayOrder() throws Exception {
+        JSONObject early=new JSONObject().put("trde_dt","20261015").put("trde_no","2").put("cntr_dt","20261013").put("stk_cd","A005930").put("io_tp_nm","매수").put("trde_qty_jwa_cnt","1").put("trde_unit","229,000");
+        JSONObject late=new JSONObject().put("trde_dt","20261015").put("trde_no","1").put("cntr_dt","20261013").put("stk_cd","A005930").put("io_tp_nm","매수").put("trde_qty_jwa_cnt","2").put("trde_unit","230,500");
+        JSONObject unknown=new JSONObject().put("trde_dt","20261015").put("trde_no","3").put("cntr_dt","20261013").put("stk_cd","A005930").put("io_tp_nm","매도").put("trde_qty_jwa_cnt","9").put("trde_unit","1");
+        JSONArray orders=new JSONArray()
+            .put(new JSONObject().put("stk_cd","A005930").put("io_tp_nm","현금매수").put("cntr_qty","0000000002").put("cntr_uv","0000230500").put("ord_tm","09:05:10"))
+            .put(new JSONObject().put("stk_cd","A005930").put("io_tp_nm","현금매수").put("cntr_qty","0000000001").put("cntr_uv","0000229000").put("ord_tm","14:20:03"));
+        Records.attachTimes(Arrays.asList(early,late,unknown),orders);
+        assertEquals("14:20:03",early.getString("ord_tm"));assertEquals("09:05:10",late.getString("ord_tm"));
+        assertFalse(unknown.has("ord_tm"));assertEquals(Records.TIME_CHECK,unknown.getInt("tm_checked"));
+        // 거래번호는 229,000이 뒤지만 주문 시각이 늦으므로 마지막 체결이다.
+        Pairing.Result r=Pairing.run(Arrays.asList(Pairing.fromTrade(early),Pairing.fromTrade(late),Pairing.fromTrade(unknown)),new HashMap<>());
+        assertEquals("20261015:2",r.fills.get(1).id);assertEquals("20261015:3",r.fills.get(2).id);
     }
     @Test public void brokerNumberParsingKeepsSignsAndPrecision() {
         assertEquals(new BigDecimal("-5350"),Numbers.parse("-000000005350"));

@@ -20,10 +20,14 @@ public class MainActivityTest {
     @Test public void demoOverviewTradesJournalAndSettingsOpen() {
         RuntimeEnvironment.getApplication().deleteDatabase("diary.db");
         try(ActivityController<MainActivity> controller=Robolectric.buildActivity(MainActivity.class).setup()) {
-            MainActivity activity=controller.get();View root=activity.getWindow().getDecorView();
+            MainActivity activity=controller.get();
+            // 시작 이미지가 2초 뒤 첫 화면으로 넘어간다.
+            assertNull(find(activity.getWindow().getDecorView(),"단타의 여왕"));
+            org.robolectric.shadows.ShadowLooper.idleMainLooper(2100,java.util.concurrent.TimeUnit.MILLISECONDS);
+            View root=activity.getWindow().getDecorView(); assertNotNull(find(root,"단타의 여왕"));
             assertNotNull(find(root,"나의 투자 기록"));find(root,"샘플로 둘러보기").performClick();root=activity.getWindow().getDecorView();
             assertNotNull(find(root,"14,000원"));assertNotNull(find(root,"종목별 실현 손익"));assertNotNull(find(root,"19,350원"));find(root,"매매 짝").performClick();root=activity.getWindow().getDecorView();
-            assertNotNull(find(root,"70,000원 × 5주    2026.09.30"));assertNotNull(find(root,"68,000 → 71,000 × 3주   +9,000원"));assertNotNull(find(root,"200,000 → 195,000 × 1주   -5,000원"));
+            assertNotNull(find(root,"70,000원 × 5주    2026.09.30"));assertNotNull(find(root,"68,000 → 71,000 × 3주   +9,000원"));assertNull("다른 종목의 짝은 숨긴다",find(root,"200,000 → 195,000 × 1주   -5,000원"));
             assertNotNull(find(root,"남은 1묶음 5주\n70,000원 × 5주"));
             find(root,"◀ 이전 체결").performClick();assertNotNull(find(root,"남은 2묶음 8주\n70,000원 × 5주\n68,000원 × 3주"));
             find(root,"거래 내역").performClick();root=activity.getWindow().getDecorView();assertNotNull(find(root,"매수  ·  삼성전자"));

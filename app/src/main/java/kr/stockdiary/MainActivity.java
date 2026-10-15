@@ -25,18 +25,31 @@ public class MainActivity extends Activity {
     private String scope="unlinked",from=LocalDate.now(ZoneId.of("Asia/Seoul")).minusDays(30).format(DateTimeFormatter.BASIC_ISO_DATE),to=LocalDate.now(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.BASIC_ISO_DATE);
     private int tab=0; private boolean busy=false; private boolean mock=false;
     private KiwoomApi activeApi; private final ExecutorService worker=Executors.newSingleThreadExecutor();
-    private String notice="",exportData,chartCode="";
+    private String notice="",step="",exportData,chartCode="",cursorFill="";
+    /** 현재가 캐시(종목코드 → 가격·조회 시각). 토큰은 메모리에만 둔다. */
+    private final Map<String,BigDecimal> quotes=new HashMap<>(); private final Map<String,Long> quoteAt=new HashMap<>();
+    private final Set<String> quoteLoading=new HashSet<>(); private volatile String quoteToken;
+    private final ExecutorService quoteWorker=Executors.newSingleThreadExecutor();
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state); getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         db=new DiaryDb(this); secrets=new Secrets(this);
         scope=getPreferences(0).getString("scope","unlinked"); mock=getPreferences(0).getBoolean("mock",false);
         from=getPreferences(0).getString("from",from); to=getPreferences(0).getString("to",to);
-        if(state!=null) tab=state.getInt("tab",0);
-        render();
+        chartCode=getPreferences(0).getString("chartCode","");
+        if(state!=null) { tab=state.getInt("tab",0); chartCode=state.getString("chartCode",chartCode); cursorFill=state.getString("cursorFill",""); }
+        if(state==null) splash(); else render();
     }
-    @Override protected void onSaveInstanceState(Bundle b) { super.onSaveInstanceState(b); b.putInt("tab",tab); }
-    @Override protected void onDestroy() { if(activeApi!=null) activeApi.cancel(); worker.execute(db::close); worker.shutdown(); super.onDestroy(); }
+    /** 앱을 처음 열 때 시작 이미지를 2초 보여 준다. 화면 비율이 달라도 찌그러지지 않게 가운데를 채워 자른다. 누르면 바로 넘어간다. */
+    private void splash() {
+        // 글자("단타의 여왕")는 이미지에 미리 새겨 두었다(원본 사진: docs/splash-source.jpg).
+        ImageView image=new ImageView(this); image.setImageResource(R.drawable.splash); image.setScaleType(ImageView.ScaleType.CENTER_CROP); image.setBackgroundColor(BG);
+        setContentView(image);
+        Runnable next=()->{ if(!isFinishing() && !isDestroyed() && root==null) render(); };
+        image.setOnClickListener(v->next.run()); image.postDelayed(next,2000);
+    }
+    @Override protected void onSaveInstanceState(Bundle b) { super.onSaveInstanceState(b); b.putInt("tab",tab); b.putString("chartCode",chartCode); b.putString("cursorFill",cursorFill); }
+    @Override protected void onDestroy() { if(activeApi!=null) activeApi.cancel(); worker.execute(db::close); worker.shutdown(); quoteWorker.shutdownNow(); super.onDestroy(); }
     private int dp(int n) { return (int)(getResources().getDisplayMetrics().density*n+.5f); }
     private GradientDrawable shape(int color,int radius) { GradientDrawable d=new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(radius)); return d; }
     private LinearLayout column() { LinearLayout v=new LinearLayout(this); v.setOrientation(LinearLayout.VERTICAL); return v; }
@@ -69,19 +82,25 @@ public class MainActivity extends Activity {
         root=column(); root.setBackgroundColor(BG);
         root.setOnApplyWindowInsetsListener((v,insets)-> { v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom()); return insets; });
         setContentView(root);
-        LinearLayout header=column(); header.setPadding(dp(22),dp(16),dp(22),dp(8));
-        TextView logo=text("주식일지  /  STOCK DIARY",14,GREEN); logo.setTypeface(null,Typeface.BOLD); header.addView(logo);
-        header.addView(text(appVersion(),12,MUTED));
+        // 가로 화면은 세로 공간이 좁아 상단 정보를 한 줄로, 하단 메뉴를 얇게 줄인다.
+        boolean wide=getResources().getConfiguration().orientation==android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+        LinearLayout header=column(); header.setPadding(dp(22),dp(wide?4:16),dp(22),dp(wide?2:8));
         String status=scope.equals("demo-v1")?"샘플 데이터 · 실제 계좌와 분리됨":scope.equals("unlinked")?"계좌 연결 전":mock?"모의투자 계좌":"실전 계좌 · 조회";
-        header.addView(text(status,12,MUTED)); root.addView(header);
+        if(wide) {
+            TextView line=text("단타의 여왕   "+status,12,GREEN); line.setTypeface(null,Typeface.BOLD); line.setPadding(0,0,0,0); header.addView(line);
+        } else {
+            TextView logo=text("단타의 여왕",14,GREEN); logo.setTypeface(null,Typeface.BOLD); header.addView(logo);
+            header.addView(text(appVersion(),12,MUTED)); header.addView(text(status,12,MUTED));
+        }
+        root.addView(header);
         ScrollView scroll=new ScrollView(this); scroll.setFillViewport(true); content=column(); content.setPadding(dp(22),dp(8),dp(22),dp(20)); scroll.addView(content); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        if(busy) { ProgressBar progress=new ProgressBar(this); content.addView(progress,new LinearLayout.LayoutParams(-1,dp(36))); content.addView(text("키움에서 내역을 가져오는 중…",14,GREEN)); }
+        if(busy) { ProgressBar progress=new ProgressBar(this); content.addView(progress,new LinearLayout.LayoutParams(-1,dp(36))); content.addView(text("키움에서 내역을 가져오는 중…",14,GREEN)); if(!step.isEmpty()) content.addView(text(step,13,MUTED)); }
         if(!notice.isEmpty()) content.addView(text(notice,13,GREEN));
         try { switch(tab) { case 0: overview(); break; case 1: lots(); break; case 2: trades(); break; case 3: journal(); break; default: settings(); } }
         catch(Exception e) { content.addView(text("저장된 데이터를 읽지 못했습니다. 앱을 다시 실행해 주세요.",14,RED)); }
-        nav=new LinearLayout(this); nav.setPadding(dp(9),dp(8),dp(9),dp(8)); nav.setBackgroundColor(PANEL);
+        nav=new LinearLayout(this); nav.setPadding(dp(9),dp(wide?2:8),dp(9),dp(wide?2:8)); nav.setBackgroundColor(PANEL);
         String[] labels={"요약","매매 짝","거래 내역","매매일지","계좌 설정"};
-        for(int i=0;i<labels.length;i++) { final int next=i; TextView item=text(labels[i],12,i==tab?GREEN:MUTED); item.setGravity(Gravity.CENTER); item.setTypeface(null,Typeface.BOLD); item.setPadding(0,dp(14),0,dp(14)); nav.addView(item,new LinearLayout.LayoutParams(0,-2,1)); item.setOnClickListener(v->{tab=next;notice="";render();}); }
+        for(int i=0;i<labels.length;i++) { final int next=i; TextView item=text(labels[i],12,i==tab?GREEN:MUTED); item.setGravity(Gravity.CENTER); item.setTypeface(null,Typeface.BOLD); item.setPadding(0,dp(wide?7:14),0,dp(wide?7:14)); nav.addView(item,new LinearLayout.LayoutParams(0,-2,1)); item.setOnClickListener(v->{tab=next;notice="";render();}); }
         root.addView(nav); root.requestApplyInsets();
     }
     private void overview() throws Exception {
@@ -113,7 +132,8 @@ public class MainActivity extends Activity {
         for(Map.Entry<String,BigDecimal> s:symbols.entrySet()) {LinearLayout row=card(content);row.addView(text(names.get(s.getKey()),15,TEXT));row.addView(text(Numbers.format(s.getValue())+"원",22,s.getValue().signum()<0?RED:GREEN));}
         content.addView(text("보유 종목 · KRX 기준",18,TEXT));
         for(JSONObject r:db.rows("holdings",scope)) { LinearLayout h=card(content); h.addView(text(r.optString("stk_nm"),17,TEXT)); h.addView(text("보유 "+Numbers.format(Numbers.parse(r.optString("rmnd_qty")))+"주 · 평균 "+Numbers.money(r.optString("avg_prc")),13,MUTED)); h.addView(text("평가 손익  "+Numbers.money(r.optString("pl_amt")),18,Numbers.parse(r.optString("pl_amt")).signum()<0?RED:GREEN)); }
-        content.addView(text("마지막 조회: "+Numbers.date(meta.getString("from"))+" ~ "+Numbers.date(meta.getString("to")),12,MUTED));
+        StringBuilder saved=new StringBuilder(); for(String[] r:db.covered(scope)) saved.append(saved.length()==0?"":", ").append(Numbers.date(r[0])).append(" ~ ").append(Numbers.date(r[1]));
+        content.addView(text("확정 저장 기간: "+(saved.length()==0?"없음":saved),12,MUTED));
         content.addView(text("저장 시각: "+java.time.Instant.ofEpochMilli(meta.getLong("synced")).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm")),12,MUTED));
         content.addView(text("월별 합계는 가져온 날짜만 포함합니다. 기간을 넓혀 동기화하면 기록이 추가됩니다. 보유 종목 평가는 실시간 시세가 아닙니다.",12,MUTED));
         button(content,"거래 내역 동기화",()->{tab=4;render();},true);
@@ -137,12 +157,20 @@ public class MainActivity extends Activity {
         try { String id=Records.tradeId(r),side=Records.side(r); LinearLayout c=card(parent);
             c.addView(text(side+"  ·  "+r.optString("stk_nm",r.optString("stk_cd")),18,side.equals("매도")?RED:GREEN));
             c.addView(text(Numbers.format(Numbers.parse(r.optString("trde_qty_jwa_cnt")))+"주 × "+Numbers.money(r.optString("trde_unit")),15,TEXT));
-            String executed=r.optString("cntr_dt"); c.addView(text("거래일 "+Numbers.date(r.optString("trde_dt"))+(executed.isEmpty()?"":" · 체결일 "+Numbers.date(executed)),11,MUTED));
-            c.addView(text("거래금액 "+Numbers.money(r.optString("trde_amt"))+" · 수수료 "+Numbers.money(r.optString("cmsn"))+" · 세금 "+Numbers.money(r.optString("trde_agri_tax")),11,MUTED));
+            String executed=r.optString("cntr_dt"),at=clock(Records.fillTime(r))+(Records.time(r.optString("cntr_tm")).isEmpty() && !Records.time(r.optString("ord_tm")).isEmpty()?"(주문)":"");
+            if(Records.isPending(r)) {
+                c.addView(text("체결일 "+Numbers.date(executed)+at+" · 결제 전",11,MUTED));
+                c.addView(text("거래금액 "+Numbers.money(r.optString("trde_amt"))+" · 수수료·세금은 결제 후 반영",11,MUTED));
+            } else {
+                c.addView(text("거래일 "+Numbers.date(r.optString("trde_dt"))+(executed.isEmpty()?"":" · 체결일 "+Numbers.date(executed)+at),11,MUTED));
+                c.addView(text("거래금액 "+Numbers.money(r.optString("trde_amt"))+" · 수수료 "+Numbers.money(r.optString("cmsn"))+" · 세금 "+Numbers.money(r.optString("trde_agri_tax")),11,MUTED));
+            }
             String note=db.note(scope,id); c.addView(text(note.isEmpty()?"＋ 매매일지 작성":note,13,note.isEmpty()?MUTED:TEXT));
             c.setOnClickListener(v->editNote(id,r.optString("stk_nm")+" · "+Numbers.date(r.optString("cntr_dt",r.optString("trde_dt")))));
         } catch(Exception e) { parent.addView(text("읽을 수 없는 거래 기록",13,RED)); }
     }
+    /** 주문 시각 HH:mm:ss → " HH:mm". 모르면 빈 값. */
+    private static String clock(String time) { return time!=null && time.length()>=5?" "+time.substring(0,5):""; }
     private int profitColor(BigDecimal n) { return n.signum()<0?RED:GREEN; }
     private String signed(BigDecimal n) { return (n.signum()>0?"+":"")+Numbers.format(n)+"원"; }
     private void lots() throws Exception {
@@ -154,8 +182,11 @@ public class MainActivity extends Activity {
         for(JSONObject h:db.rows("holdings",scope)) { String code=Pairing.code(h.optString("stk_cd")); names.putIfAbsent(code,h.optString("stk_nm",code)); held.put(code,Numbers.parse(h.optString("rmnd_qty"))); }
         if(names.isEmpty()) { LinearLayout c=card(content); c.addView(text("짝지을 거래가 없습니다",18,TEXT)); c.addView(text("계좌 설정에서 거래 내역을 가져오세요.",14,MUTED)); button(c,"계좌 설정",()->{tab=4;render();},true); return; }
         chart(r,names);
-        content.addView(text("남은 물량 · 이 값보다 오르면 매도",18,TEXT));
+        // 그래프에서 고른 종목만 보여 준다. 체결이 하나도 없어 그래프가 없을 때만 전체를 보여 준다.
+        final String only=r.fillsOf(chartCode).isEmpty()?null:chartCode;
+        content.addView(text("남은 물량"+(only==null?"":" · "+names.get(only))+" · 이 값보다 오르면 매도",18,TEXT));
         for(Map.Entry<String,String> s:names.entrySet()) {
+            if(only!=null && !s.getKey().equals(only)) continue;
             List<Pairing.Lot> open=new ArrayList<>(); long remaining=0;
             for(Pairing.Lot l:r.open) if(l.buy.code.equals(s.getKey())) { open.add(l); remaining+=l.remaining; }
             long orphan=0; for(Map.Entry<String,Long> u:r.unmatched.entrySet()) if(r.fill(u.getKey()).code.equals(s.getKey())) orphan+=u.getValue();
@@ -171,9 +202,9 @@ public class MainActivity extends Activity {
             if(orphan>0) c.addView(text("매수 기록이 없는 매도 "+Numbers.format(BigDecimal.valueOf(orphan))+"주",12,RED));
         }
         button(content,"기초 물량 추가",()->addOpeningLot(names,r),false);
-        content.addView(text("완료된 짝",18,TEXT)); content.addView(text("매도를 눌러 짝지을 매수를 직접 고를 수 있습니다. 손익은 수수료·세금 제외.",12,MUTED));
+        content.addView(text("완료된 짝"+(only==null?"":" · "+names.get(only)),18,TEXT)); content.addView(text("매도를 눌러 짝지을 매수를 직접 고를 수 있습니다. 손익은 수수료·세금 제외.",12,MUTED));
         Map<String,List<Pairing.Pair>> bySell=new LinkedHashMap<>(); BigDecimal total=BigDecimal.ZERO;
-        for(int i=r.fills.size()-1;i>=0;i--) { Pairing.Fill f=r.fills.get(i); if(f.side.equals("매도")) bySell.put(f.id,r.pairsOf(f.id)); }
+        for(int i=r.fills.size()-1;i>=0;i--) { Pairing.Fill f=r.fills.get(i); if(f.side.equals("매도") && (only==null || f.code.equals(only))) bySell.put(f.id,r.pairsOf(f.id)); }
         for(Map.Entry<String,List<Pairing.Pair>> e:bySell.entrySet()) {
             Pairing.Fill sell=r.fill(e.getKey()); LinearLayout c=card(content);
             c.addView(text(sell.name+" · "+Numbers.date(sell.day)+" 매도 "+Numbers.format(BigDecimal.valueOf(sell.qty))+"주",13,MUTED));
@@ -193,24 +224,106 @@ public class MainActivity extends Activity {
         if(codes.size()>1) {
             Spinner pick=new Spinner(this); List<String> labels=new ArrayList<>(); for(String code:codes) labels.add(names.get(code));
             pick.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,labels)); pick.setSelection(codes.indexOf(chartCode)); c.addView(pick);
-            pick.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() { public void onItemSelected(AdapterView<?> p,View v,int pos,long id) { if(!codes.get(pos).equals(chartCode)) { chartCode=codes.get(pos); render(); } } public void onNothingSelected(AdapterView<?> p) {} });
+            pick.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() { public void onItemSelected(AdapterView<?> p,View v,int pos,long id) { if(!codes.get(pos).equals(chartCode)) { chartCode=codes.get(pos); getPreferences(0).edit().putString("chartCode",chartCode).apply(); render(); } } public void onNothingSelected(AdapterView<?> p) {} });
         } else c.addView(text(names.get(chartCode),17,TEXT));
         c.addView(text("▲ 매수  ▼ 매도  숫자는 수량 · 실선은 짝 · 점선은 남은 묶음. 그래프를 끌어 시점을 고르세요.",11,MUTED));
+        TextView quoteLine=text("",13,LotChart.QUOTE); c.addView(quoteLine);
         LotChart chart=new LotChart(this); c.addView(chart,new LinearLayout.LayoutParams(-1,-2));
-        TextView at=text("",14,LotChart.CURSOR),held=text("",16,TEXT),detail=text("",12,MUTED); c.addView(at); c.addView(held); c.addView(detail);
+        showQuote(chart,quoteLine,chartCode);
         LinearLayout steps=new LinearLayout(this); c.addView(steps);
         for(int d:new int[]{-1,1}) { Button b=new Button(this); b.setText(d<0?"◀ 이전 체결":"다음 체결 ▶"); b.setAllCaps(false); b.setTextColor(TEXT); b.setBackground(shape(Color.rgb(42,57,68),12));
             LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(42),1); lp.setMargins(d<0?0:dp(5),dp(6),d<0?dp(5):0,0); steps.addView(b,lp); b.setOnClickListener(v->chart.moveCursor(chart.cursorIndex()+d)); }
-        chart.show(r,chartCode,f->{
+        TextView at=text("",14,LotChart.CURSOR),now=text("",13,TEXT),held=text("",16,TEXT),detail=text("",12,MUTED); c.addView(at); c.addView(now); c.addView(held); c.addView(detail);
+        final BigDecimal[] rates=costRates();
+        // 그래프에서 고른 체결부터 이 종목의 짝과 손익을 계산한다. 그보다 앞선 체결은 그래프에서도 빠지므로 되돌리기 버튼을 둔다.
+        final Pairing.Fill[] selected=new Pairing.Fill[1]; final String code=chartCode;
+        String startId=db.pairStarts(scope).get(code); Pairing.Fill start=startId==null?null:r.fill(startId);
+        if(start!=null) c.addView(text("짝 계산 시작: "+Numbers.date(start.day)+" "+start.side+" "+Numbers.format(start.price)+"원 × "+start.qty+"주 · 이전 체결은 제외",12,GREEN));
+        LinearLayout startRow=new LinearLayout(this); c.addView(startRow);
+        String[] startLabels=start==null?new String[]{"이 체결부터 짝 계산"}:new String[]{"이 체결부터 짝 계산","처음부터 계산"};
+        for(int i=0;i<startLabels.length;i++) { final boolean reset=i==1; Button b=new Button(this); b.setText(startLabels[i]); b.setAllCaps(false); b.setTextColor(TEXT); b.setBackground(shape(Color.rgb(42,57,68),12));
+            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(42),1); lp.setMargins(i==0?0:dp(5),dp(6),0,0); startRow.addView(b,lp);
+            b.setOnClickListener(v->{
+                if(reset) { db.setPairStart(scope,code,null); notice="처음 체결부터 다시 짝지었습니다."; render(); return; }
+                Pairing.Fill f=selected[0]; if(f==null || f.opening) { toast("그래프에서 거래 체결을 먼저 골라 주세요."); return; }
+                db.setPairStart(scope,code,f.id); notice=Numbers.date(f.day)+" "+f.side+" 체결부터 짝을 계산합니다."; render();
+            }); }
+        final String keep=cursorFill;
+        chart.show(r,chartCode,f->{ selected[0]=f; cursorFill=f.id;
+            BigDecimal quote=chart.quote(); now.setText(quote==null?"":versusNow(f,quote,rates)); now.setTextColor(quote==null?TEXT:profitColor(f.side.equals("매수")?quote.subtract(f.price):f.price.subtract(quote)));
             List<Pairing.Lot> lots=r.heldAt(f); long qty=0; StringBuilder ladder=new StringBuilder();
             for(Pairing.Lot l:lots) { qty+=l.remaining; if(ladder.length()>0) ladder.append('\n'); ladder.append(Numbers.format(l.buy.price)).append("원 × ").append(l.remaining).append("주"); }
-            at.setText(String.format(Locale.KOREA,"%s %s %s원 × %d주 직후",Numbers.date(f.day),f.side,Numbers.format(f.price),f.qty));
+            at.setText(String.format(Locale.KOREA,"%s%s %s %s원 × %d주 직후",Numbers.date(f.day),clock(f.time),f.side,Numbers.format(f.price),f.qty));
             held.setText(lots.isEmpty()?"남은 묶음 없음":"남은 "+lots.size()+"묶음 "+qty+"주\n"+ladder);
             StringBuilder partners=new StringBuilder();
             for(Pairing.Pair p:r.pairs) { Pairing.Fill other=p.buy==f?p.sell:p.sell==f?p.buy:null; if(other==null) continue;
                 partners.append(partners.length()==0?"짝: ":", ").append(other.side).append(" ").append(Numbers.date(other.day)).append(" ").append(Numbers.format(other.price)).append("원 ").append(p.qty).append("주 (").append(signed(p.profit())).append(")"); }
             detail.setText(partners.length()==0?"이 체결은 아직 짝이 없습니다.":partners);
         });
+        // 화면을 돌리거나 다시 그려도 고른 체결에 커서를 둔다.
+        List<Pairing.Fill> shown=r.fillsOf(code); for(int i=0;i<shown.size();i++) if(shown.get(i).id.equals(keep)) chart.moveCursor(i);
+    }
+    /**
+     * 수수료율·세금률. 저장된 결제 거래의 실제 수수료/거래금액, 매도 세금/매도금액으로 추정한다.
+     * 기록이 없으면 온라인 수수료 0.015%, 매도 세금 0.20%를 쓴다. [0]=수수료율, [1]=세금률
+     */
+    private BigDecimal[] costRates() {
+        BigDecimal amount=BigDecimal.ZERO,fee=BigDecimal.ZERO,sold=BigDecimal.ZERO,tax=BigDecimal.ZERO;
+        try { for(JSONObject t:db.rows("trades",scope)) { if(Records.isPending(t)) continue;
+                BigDecimal a=Numbers.parse(t.optString("trde_amt")).abs(); if(a.signum()==0) continue;
+                amount=amount.add(a); fee=fee.add(Numbers.parse(t.optString("cmsn")).abs());
+                if(Records.side(t).equals("매도")) { sold=sold.add(a); tax=tax.add(Numbers.parse(t.optString("trde_agri_tax")).abs()); } } }
+        catch(Exception ignored) {}
+        java.math.MathContext mc=java.math.MathContext.DECIMAL64;
+        // [2]: 1이면 둘 다 내 기록에서 구한 값
+        return new BigDecimal[]{ amount.signum()>0?fee.divide(amount,mc):new BigDecimal("0.00015"), sold.signum()>0?tax.divide(sold,mc):new BigDecimal("0.0020"), amount.signum()>0 && sold.signum()>0?BigDecimal.ONE:BigDecimal.ZERO };
+    }
+    /** 고른 체결과 현재가의 차이. 매수는 지금 팔면 남는 돈(매수·매도 수수료와 매도 세금 차감), 매도는 판 뒤 가격이 얼마나 움직였는지. */
+    private String versusNow(Pairing.Fill f,BigDecimal quote,BigDecimal[] rates) {
+        BigDecimal per=quote.subtract(f.price),qty=BigDecimal.valueOf(f.qty);
+        String pct=f.price.signum()==0?"":String.format(Locale.KOREA," (%+.2f%%)",per.doubleValue()*100/f.price.doubleValue());
+        String head="현재가 "+Numbers.format(quote)+"원 · 주당 "+(per.signum()>0?"+":"")+Numbers.format(per)+"원"+pct;
+        if(!f.side.equals("매수")) {
+            BigDecimal kept=f.price.subtract(quote).multiply(qty);
+            return head+"\n판 뒤 변동: 지금 팔았다면 "+(kept.signum()>=0?"덜 받음 ":"더 받음 ")+Numbers.format(kept.abs().setScale(0,java.math.RoundingMode.HALF_UP))+"원";
+        }
+        BigDecimal buy=f.price.multiply(qty),sell=quote.multiply(qty);
+        BigDecimal fees=buy.add(sell).multiply(rates[0]).setScale(0,java.math.RoundingMode.DOWN),tax=sell.multiply(rates[1]).setScale(0,java.math.RoundingMode.DOWN);
+        BigDecimal net=sell.subtract(buy).subtract(fees).subtract(tax);
+        return head+"\n지금 "+f.qty+"주 팔면 "+signed(net)+"  (수수료 "+Numbers.format(fees)+" · 세금 "+Numbers.format(tax)+")"
+            +String.format(Locale.KOREA,"\n수수료율 %.3f%% · 세금률 %.2f%% (%s)",rates[0].doubleValue()*100,rates[1].doubleValue()*100,rates[2].signum()>0?"내 거래 기록 기준 추정":"기본값");
+    }
+    /** 캐시된 현재가를 바로 그리고, 1분이 지났으면 키움에서 다시 받아 같은 그래프를 고친다. 실패하면 마지막 동기화의 보유 종목 현재가를 쓴다. */
+    private void showQuote(LotChart chart,TextView line,String code) {
+        BigDecimal cached=quotes.get(code); Long when=quoteAt.get(code);
+        if(cached!=null) { chart.setQuote(cached); line.setText("현재가 "+Numbers.format(cached)+"원 · "+Instant.ofEpochMilli(when).atZone(ZoneId.of("Asia/Seoul")).format(DateTimeFormatter.ofPattern("HH:mm"))+" 기준"); }
+        if((when!=null && System.currentTimeMillis()-when<60_000) || quoteLoading.contains(code) || scope.equals("demo-v1")) { if(cached==null) fallbackQuote(chart,line,code); return; }
+        final JSONObject credentials; try { credentials=secrets.load(); } catch(Exception e) { fallbackQuote(chart,line,code); return; }
+        if(credentials==null) { fallbackQuote(chart,line,code); return; }
+        if(cached==null) line.setText("현재가 불러오는 중…");
+        quoteLoading.add(code);
+        quoteWorker.execute(()->{
+            BigDecimal price=null;
+            try { KiwoomApi api=new KiwoomApi(credentials.optBoolean("mock"));
+                if(quoteToken==null) quoteToken=api.authenticate(credentials.getString("key"),credentials.getString("secret"));
+                price=api.currentPrice(quoteToken,code);
+            } catch(Exception e) { quoteToken=null; android.util.Log.w("StockDiary","quote "+code+" failed: "+reason(e)); }
+            final BigDecimal result=price;
+            runOnUiThread(()->{ quoteLoading.remove(code); if(isDestroyed() || isFinishing()) return;
+                if(result!=null) { quotes.put(code,result); quoteAt.put(code,System.currentTimeMillis()); }
+                // 화면이 이미 다른 종목·탭으로 바뀌었으면 그 그래프는 버려진 것이라 고쳐도 보이지 않는다.
+                // 같은 종목 화면이 그사이 다시 그려졌다면 새 그래프에 반영되도록 다시 그린다.
+                if(!chart.isAttachedToWindow()) { if(result!=null && tab==1 && code.equals(chartCode) && !busy) render(); return; }
+                if(result!=null) showQuote(chart,line,code); else if(quotes.get(code)==null) fallbackQuote(chart,line,code);
+            });
+        });
+    }
+    private void fallbackQuote(LotChart chart,TextView line,String code) {
+        try { for(JSONObject h:db.rows("holdings",scope)) if(Pairing.code(h.optString("stk_cd")).equals(code)) {
+                BigDecimal p=Numbers.parse(h.optString("cur_prc")).abs(); if(p.signum()==0) break;
+                chart.setQuote(p); line.setText("현재가 "+Numbers.format(p)+"원 · 마지막 동기화 기준"); return; } }
+        catch(Exception ignored) {}
+        line.setText("현재가를 불러오지 못했습니다.");
     }
     private LinearLayout dialogBody(AlertDialog.Builder b) {
         LinearLayout body=column(); body.setPadding(dp(22),dp(8),dp(22),dp(8)); ScrollView sv=new ScrollView(this); sv.addView(body); b.setView(sv); return body;
@@ -289,8 +402,13 @@ public class MainActivity extends Activity {
         c.addView(text("다른 키로 변경하면 기록을 분리합니다. 키를 재발급했다면 이전 기록은 백업해 두세요.",12,MUTED));
         button(c,"연결 확인 · 인증만 테스트",this::testConnection,false);
         LinearLayout sync=card(content); sync.addView(text("거래 내역 동기화",18,TEXT));
+        LinearLayout presets=new LinearLayout(this); sync.addView(presets);
+        int[] spans={1,2,3,5};
+        for(int i=0;i<spans.length;i++) { final int years=spans[i]; Button b=new Button(this); b.setText(i==0?"최근 1년":years+"년"); b.setAllCaps(false); b.setTextSize(13); b.setTextColor(TEXT); b.setBackground(shape(Color.rgb(42,57,68),12));
+            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,dp(42),1); lp.setMargins(i==0?0:dp(4),dp(6),0,0); presets.addView(b,lp); b.setEnabled(!busy);
+            b.setOnClickListener(v->{ LocalDate today=LocalDate.now(ZoneId.of("Asia/Seoul")); to=today.format(DateTimeFormatter.BASIC_ISO_DATE); from=today.minusYears(years).plusDays(1).format(DateTimeFormatter.BASIC_ISO_DATE); persist(); render(); }); }
         button(sync,"시작일  "+Numbers.date(from),()->pickDate(true),false); button(sync,"종료일  "+Numbers.date(to),()->pickDate(false),false);
-        sync.addView(text("거래일 기준 조회 · 국내주식 KRX/NXT 거래 포함\n보유 종목 평가는 KRX 기준입니다.",12,MUTED));
+        sync.addView(text("거래일 기준 조회 · 국내주식 KRX/NXT 거래 포함\n결제(체결 2영업일 후) 전 최근 체결도 함께 가져옵니다.\n이미 저장한 기간은 건너뛰고, 1년이 넘으면 나눠서 가져옵니다.\n보유 종목 평가는 KRX 기준입니다.",12,MUTED));
         button(sync,"선택한 기간 가져오기",this::sync,true);
         button(content,"샘플 데이터로 둘러보기",this::demo,false);
         if(hasSaved && scope.equals("demo-v1")) button(content,"내 계좌 기록으로 돌아가기",()->{ try {JSONObject credentials=secrets.load();scope=Records.scope(credentials.getString("key"),credentials.getBoolean("mock"));mock=credentials.getBoolean("mock");persist();tab=0;render();} catch(Exception e){toast("저장된 키를 읽지 못했습니다.");}},false);
@@ -300,8 +418,9 @@ public class MainActivity extends Activity {
     }
     private void pickDate(boolean start) {
         LocalDate date=LocalDate.parse(start?from:to,DateTimeFormatter.BASIC_ISO_DATE);
-        DatePickerDialog d=new DatePickerDialog(this,(p,y,m,day)->{ String value=LocalDate.of(y,m+1,day).format(DateTimeFormatter.BASIC_ISO_DATE); if(start) from=value;else to=value;persist();render(); },date.getYear(),date.getMonthValue()-1,date.getDayOfMonth());
-        d.getDatePicker().setMaxDate(System.currentTimeMillis()); d.show();
+        // 연·월·일 휠 방식. 달력 방식은 연도를 바꾸기 어렵다.
+        DatePickerDialog d=new DatePickerDialog(this,android.R.style.Theme_Holo_Dialog,(p,y,m,day)->{ String value=LocalDate.of(y,m+1,day).format(DateTimeFormatter.BASIC_ISO_DATE); if(start) from=value;else to=value;persist();render(); },date.getYear(),date.getMonthValue()-1,date.getDayOfMonth());
+        d.getDatePicker().setMaxDate(System.currentTimeMillis()); d.getDatePicker().setCalendarViewShown(false); d.setTitle(start?"시작일":"종료일"); d.show();
     }
     private void persist() { getPreferences(0).edit().putString("scope",scope).putBoolean("mock",mock).putString("from",from).putString("to",to).apply(); }
     private void testConnection() {
@@ -321,21 +440,64 @@ public class MainActivity extends Activity {
     private void sync() {
         if(busy) return;
         if(from.compareTo(to)>0) {toast("시작일은 종료일보다 늦을 수 없습니다.");return;}
-        if(LocalDate.parse(from,DateTimeFormatter.BASIC_ISO_DATE).plusDays(366).isBefore(LocalDate.parse(to,DateTimeFormatter.BASIC_ISO_DATE))) {toast("한 번에 1년 이내의 기간을 조회해 주세요.");return;}
-        final JSONObject credentials; final String targetScope; final String start=from,end=to;
+        final JSONObject credentials; final String targetScope; final List<String[]> chunks;
         try { credentials=secrets.load(); if(credentials==null) {toast("먼저 인증키를 저장해 주세요.");return;} targetScope=Records.scope(credentials.getString("key"),credentials.getBoolean("mock")); }
         catch(Exception e) {toast("저장된 키를 읽지 못했습니다. 다시 입력해 주세요.");return;}
-        busy=true; notice=""; render();
+        // 이미 확정 저장한 기간은 건너뛰고, 빠진 기간만 1년 이하 구간으로 나눠 받는다.
+        try { chunks=Records.chunks(db.missing(targetScope,from,to)); } catch(Exception e) {toast("저장된 기록을 읽지 못했습니다.");return;}
+        try { if(chunks.isEmpty() && db.tradesWithoutTime(targetScope).isEmpty()) { notice="선택한 기간은 이미 모두 저장되어 있습니다."; render(); return; } }
+        catch(Exception e) {toast("저장된 기록을 읽지 못했습니다.");return;}
+        final String settledThrough=LocalDate.now(ZoneId.of("Asia/Seoul")).minusDays(1).format(DateTimeFormatter.BASIC_ISO_DATE);
+        busy=true; notice=""; step=""; render();
         activeApi=new KiwoomApi(credentials.optBoolean("mock"));
         worker.execute(()->{
-            String result; boolean success=false;
-            try { KiwoomApi.Snapshot snapshot=activeApi.sync(credentials.getString("key"),credentials.getString("secret"),start,end); db.snapshot(targetScope,start,end,snapshot); result="동기화 완료 · 거래 "+snapshot.trades.length()+"건"; success=true; }
+            String result; int done=0,trades=0,pending=0; String pendingNotice=""; StringBuilder failures=new StringBuilder();
+            try { String token=activeApi.authenticate(credentials.getString("key"),credentials.getString("secret"));
+                for(int i=0;i<chunks.size();i++) { String[] c=chunks.get(i);
+                    final String label=(chunks.size()>1?(i+1)+"/"+chunks.size()+" 구간 · ":"")+Numbers.date(c[0])+" ~ "+Numbers.date(c[1]);
+                    runOnUiThread(()->{ if(busy) {step=label;render();} });
+                    // 한 구간이 실패해도 나머지 구간은 계속 받는다. 실패한 구간은 확정 저장 기간에 넣지 않아 다음에 다시 시도한다.
+                    try {
+                        KiwoomApi.Snapshot snapshot=activeApi.fetch(token,c[0],c[1]); db.snapshot(targetScope,c[0],c[1],snapshot,settledThrough);
+                        done++; trades+=snapshot.trades.length(); pending+=snapshot.pending; if(!snapshot.pendingNotice.isEmpty()) pendingNotice=snapshot.pendingNotice;
+                    } catch(InterruptedException e) { throw e;
+                    } catch(Exception e) {
+                        String why=reason(e); failures.append("\n· ").append(Numbers.date(c[0])).append(" ~ ").append(Numbers.date(c[1])).append(": ").append(why);
+                        android.util.Log.w("StockDiary","sync "+c[0]+"~"+c[1]+" failed: "+why+" "+where(e));
+                    }
+                }
+                result=chunks.isEmpty()?"선택한 기간은 이미 모두 저장되어 있습니다.":(done==chunks.size()?"동기화 완료 · ":chunks.size()+"개 구간 중 "+done+"개 저장 · ")+"새로 받은 거래 "+trades+"건"+(pending>0?" (결제 전 체결 "+pending+"건 포함)":"")+(pendingNotice.isEmpty()?"":"\n"+pendingNotice);
+                if(failures.length()>0) result+="\n못 받은 구간 (다시 동기화하면 다시 시도):"+failures;
+                // 결제된 거래에는 체결 시각이 없어 그날 주문체결내역의 주문 시각을 붙인다. 날짜마다 한 번만 확인한다.
+                Map<String,List<JSONObject>> untimed=db.tradesWithoutTime(targetScope); int day=0,timeFailures=0;
+                for(Map.Entry<String,List<JSONObject>> e:untimed.entrySet()) {
+                    final String label="체결 시각 확인 "+(++day)+"/"+untimed.size()+" · "+Numbers.date(e.getKey());
+                    runOnUiThread(()->{ if(busy) {step=label;render();} });
+                    try { Records.attachTimes(e.getValue(),activeApi.orderFills(token,e.getKey())); db.updateTrades(targetScope,e.getValue()); done=Math.max(done,1); }
+                    catch(InterruptedException x) { throw x; }
+                    catch(Exception x) { timeFailures++; android.util.Log.w("StockDiary","time "+e.getKey()+" failed: "+reason(x)+" "+where(x)); }
+                }
+                if(timeFailures>0) result+="\n체결 시각을 확인하지 못한 날 "+timeFailures+"일 (다음 동기화 때 다시 시도)";
+            }
             catch(KiwoomApi.ApiException e) {result=e.getMessage();}
-            catch(IllegalArgumentException e) {result="조회 데이터 검증에 실패했습니다. 기존 기록은 유지됩니다.";}
             catch(Exception e) {result="동기화하지 못했습니다. 인터넷·인증키·등록 IP를 확인해 주세요. 기존 기록은 유지됩니다.";}
-            final String message=result; final boolean ok=success;
-            runOnUiThread(()->{ if(isDestroyed() || isFinishing()) return;busy=false;activeApi=null;if(ok){scope=targetScope;mock=credentials.optBoolean("mock");persist();tab=0;}notice=message;render(); });
+            final String message=result; final boolean ok=done>0;
+            runOnUiThread(()->{ if(isDestroyed() || isFinishing()) return;busy=false;step="";activeApi=null;if(ok){scope=targetScope;mock=credentials.optBoolean("mock");persist();tab=0;}notice=message;render(); });
         });
+    }
+    /** 화면과 로그에 남겨도 되는 실패 사유. 서버 원문이나 응답 값은 넣지 않는다. */
+    private static String reason(Exception e) {
+        if(e instanceof KiwoomApi.ApiException) return e.getMessage();
+        if(e instanceof NumberFormatException) return "응답의 숫자 형식을 읽지 못했습니다.";
+        if(e instanceof IllegalArgumentException) return e.getMessage();
+        if(e instanceof JSONException) return "응답 형식이 예상과 다릅니다.";
+        return "통신 또는 저장 오류 ("+e.getClass().getSimpleName()+")";
+    }
+    /** 실패 위치(앱 코드의 호출 줄)만 남긴다. */
+    private static String where(Exception e) {
+        StringBuilder out=new StringBuilder(e.getClass().getSimpleName());
+        for(StackTraceElement f:e.getStackTrace()) if(f.getClassName().startsWith("kr.stockdiary")) out.append(" < ").append(f.getClassName().substring(14)).append(':').append(f.getLineNumber());
+        return out.toString();
     }
     private void demo() {
         if(busy)return;
